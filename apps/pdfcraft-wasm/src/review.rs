@@ -3,7 +3,7 @@
 //! page's points from its top-left, y down (the same space as `objects` and `text_blocks`).
 
 use pdfcraft_engine::{Edit, FieldValue, FillMark, LineEnding, LinkAction, LinkStyle, Markup, NewAnnotation, NoteIcon, Shape, StampKind, Style};
-use pdfcraft_render::{FieldKind, LinkTarget};
+use pdfcraft_render::LinkTarget;
 use serde_json::{Value, json};
 
 use crate::core::Document;
@@ -322,7 +322,6 @@ impl Document {
                 K::PushButton => "button",
                 K::Combo | K::List => "choice",
                 K::Signature => "signature",
-                _ => continue,
             };
             for (index, w) in f.widgets.iter().enumerate().filter(|(_, w)| w.page == Some(page)) {
                 let (a, b) = (info.user_to_view(w.rect[0] as f32, w.rect[1] as f32), info.user_to_view(w.rect[2] as f32, w.rect[3] as f32));
