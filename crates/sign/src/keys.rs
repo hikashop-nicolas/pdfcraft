@@ -570,7 +570,7 @@ enum Inner {
     #[cfg(not(target_arch = "wasm32"))]
     Rsa(aws_lc_rs::signature::RsaKeyPair),
     #[cfg(target_arch = "wasm32")]
-    Rsa,
+    Rsa(Box<rsa::RsaPrivateKey>),
     P256(p256::ecdsa::SigningKey),
     P384(p384::ecdsa::SigningKey),
     /// A key held elsewhere (the macOS Keychain, a token) that signs on request.
@@ -630,7 +630,7 @@ impl PrivateKey {
                         .map_err(|e| SignError::Malformed(format!("RSA private key: {e}")))?,
                 );
                 #[cfg(target_arch = "wasm32")]
-                let inner = Inner::Rsa;
+                let inner = Inner::Rsa(Box::new(rsa_private_key(&k)?));
                 Ok(PrivateKey { inner, public: PublicKey::Rsa { n, e }, pkcs8: info.to_vec() })
             }
             oid::EC => {
@@ -748,7 +748,7 @@ impl PrivateKey {
                 Ok(sig)
             }
             #[cfg(target_arch = "wasm32")]
-            Inner::Rsa => Err(SignError::Unsupported("RSA signing in the browser".into())),
+            Inner::Rsa(key) => rsa_sign_pkcs1(key, alg, msg),
             Inner::P256(k) => {
                 use p256::ecdsa::signature::hazmat::PrehashSigner;
                 let s: p256::ecdsa::Signature = k.sign_prehash(&alg.digest(&[msg])).map_err(|e| SignError::Crypto(e.to_string()))?;
@@ -760,6 +760,86 @@ impl PrivateKey {
                 let s: p384::ecdsa::Signature = k.sign_prehash(&alg.digest(&[msg])).map_err(|e| SignError::Crypto(e.to_string()))?;
                 Ok(s.to_der().as_bytes().to_vec())
             }
+        }
+    }
+}
+
+/// The private key of a PKCS #1 `RSAPrivateKey` (version, n, e, d, p, q, ...), for targets without aws-lc.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn rsa_private_key(k: &[Tlv<'_>]) -> Result<rsa::RsaPrivateKey, SignError> {
+    use rsa::BoxedUint;
+    let (Some(n), Some(e), Some(d), Some(p), Some(q)) = (k.get(1), k.get(2), k.get(3), k.get(4), k.get(5)) else {
+        return Err(SignError::Malformed("RSAPrivateKey".into()));
+    };
+    let big = |t: &Tlv<'_>| BoxedUint::from_be_slice_vartime(t.uint_bytes());
+    rsa::RsaPrivateKey::from_components(big(n), big(e), big(d), vec![big(p), big(q)])
+        .map_err(|e| SignError::Malformed(format!("RSA private key: {e}")))
+}
+
+/// A source of randomness that does not exist: the RSA private operation then runs unblinded. A key
+/// used by one person on their own device has no one to time it, which is what blinding guards against.
+enum NoRng {}
+
+impl rsa::rand_core::TryRng for NoRng {
+    type Error = std::convert::Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+        match *self {}
+    }
+    fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+        match *self {}
+    }
+    fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> Result<(), Self::Error> {
+        match *self {}
+    }
+}
+
+impl rsa::rand_core::TryCryptoRng for NoRng {}
+
+/// RSASSA-PKCS1-v1_5 (RFC 8017 §8.2.1) with a hash from this crate: the encoded message is built here and
+/// the private operation comes from the `rsa` crate.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn rsa_sign_pkcs1(key: &rsa::RsaPrivateKey, alg: DigestAlg, msg: &[u8]) -> Result<Vec<u8>, SignError> {
+    use rsa::traits::PublicKeyParts;
+    let prefix: &[u8] = match alg {
+        DigestAlg::Sha256 => &[0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20],
+        DigestAlg::Sha384 => &[0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02, 0x05, 0x00, 0x04, 0x30],
+        DigestAlg::Sha512 => &[0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03, 0x05, 0x00, 0x04, 0x40],
+        other => return Err(SignError::Unsupported(format!("{} for new signatures", other.name()))),
+    };
+    let hash = alg.digest(&[msg]);
+    let k = key.size();
+    let t = prefix.len() + hash.len();
+    if k < t + 11 {
+        return Err(SignError::Crypto("the RSA key is too small for this digest".into()));
+    }
+    let mut em = vec![0xffu8; k];
+    em[0] = 0;
+    em[1] = 1;
+    em[k - t - 1] = 0;
+    em[k - t..k - hash.len()].copy_from_slice(prefix);
+    em[k - hash.len()..].copy_from_slice(&hash);
+    let c = rsa::BoxedUint::from_be_slice(&em, key.n().bits_precision()).map_err(|e| SignError::Crypto(format!("RSA message: {e}")))?;
+    let m = rsa::hazmat::rsa_decrypt_and_check(key, None::<&mut NoRng>, &c).map_err(|e| SignError::Crypto(format!("RSA signing failed: {e}")))?;
+    let bytes = m.to_be_bytes();
+    let mut sig = vec![0u8; k.saturating_sub(bytes.len())];
+    sig.extend_from_slice(&bytes);
+    Ok(sig)
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod rsa_pure_tests {
+    use super::*;
+
+    #[test]
+    fn the_pure_signature_verifies_like_the_native_one() {
+        let key = PrivateKey::generate_rsa(2048).expect("a key");
+        let k = Tlv::parse_all(&key.pkcs8).expect("pkcs8").children().expect("children");
+        let inner = Tlv::parse_all(k[2].value).expect("rsa key").children().expect("children");
+        let pure = rsa_private_key(&inner).expect("reads the components");
+        for alg in [DigestAlg::Sha256, DigestAlg::Sha384, DigestAlg::Sha512] {
+            let sig = rsa_sign_pkcs1(&pure, alg, b"the signed bytes").expect("signs");
+            let native = key.sign(alg, b"the signed bytes").expect("the native signature");
+            assert_eq!(sig, native, "PKCS#1 v1.5 is deterministic, so both are the same bytes");
         }
     }
 }
