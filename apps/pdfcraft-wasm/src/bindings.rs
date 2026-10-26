@@ -241,6 +241,11 @@ impl Pdf {
         self.inner.delete_field(name).map_err(js)
     }
 
+    /// Deletes one widget of a field with several (a radio group's button).
+    pub fn delete_field_widget(&mut self, name: &str, widget: usize) -> Result<(), JsError> {
+        self.inner.delete_field_widget(name, widget).map_err(js)
+    }
+
     pub fn set_field_props(&mut self, name: &str, spec: &str) -> Result<(), JsError> {
         self.inner.set_field_props(name, spec).map_err(js)
     }

@@ -307,29 +307,43 @@ impl Document {
 
     /// The form fields on a page as JSON: `name`, `kind` (`text`, `check`, `radio`, `button`, `choice`,
     /// `signature`), `value`, `view`.
+    /// The form fields on a page as JSON, one entry per widget: `name`, `kind` (`text`, `check`, `radio`, `button`,
+    /// `choice`, `signature`), `value`, `view`, `widget` (its number among the field's widgets), and for a check box
+    /// or radio button `on` and `export` (what choosing it sets), for a choice `combo` and `options`.
     pub fn fields_json(&self, page: usize) -> Result<String, String> {
+        use pdfcraft_engine::FormFieldKind as K;
         let info = self.page_info_ref(page)?;
-        let list: Vec<Value> = self
-            .doc()?
-            .info
-            .fields
-            .iter()
-            .filter(|f| f.page == Some(page))
-            .filter_map(|f| {
-                let r = f.rect?;
-                let (a, b) = (info.user_to_view(r[0], r[1]), info.user_to_view(r[2], r[3]));
-                let kind = match f.kind {
-                    FieldKind::Text => "text",
-                    FieldKind::CheckBox => "check",
-                    FieldKind::Radio => "radio",
-                    FieldKind::PushButton => "button",
-                    FieldKind::Combo | FieldKind::List => "choice",
-                    FieldKind::Signature => "signature",
-                    FieldKind::Unknown => return None,
-                };
-                Some(json!({ "name": f.name, "kind": kind, "value": f.value, "view": [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])] }))
-            })
-            .collect();
+        let mut list: Vec<Value> = Vec::new();
+        for f in self.doc()?.form.iter() {
+            let kind = match f.kind {
+                K::Text => "text",
+                K::CheckBox => "check",
+                K::Radio => "radio",
+                K::PushButton => "button",
+                K::Combo | K::List => "choice",
+                K::Signature => "signature",
+                _ => continue,
+            };
+            for (index, w) in f.widgets.iter().enumerate().filter(|(_, w)| w.page == Some(page)) {
+                let (a, b) = (info.user_to_view(w.rect[0] as f32, w.rect[1] as f32), info.user_to_view(w.rect[2] as f32, w.rect[3] as f32));
+                let mut entry = json!({
+                    "name": f.name,
+                    "kind": kind,
+                    "value": f.value.first(),
+                    "view": [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])],
+                    "widget": index,
+                });
+                if matches!(f.kind, K::CheckBox | K::Radio) {
+                    entry["on"] = json!(w.state.is_some() && w.state == w.on_state);
+                    entry["export"] = json!(w.on_state);
+                }
+                if matches!(f.kind, K::Combo | K::List) {
+                    entry["combo"] = json!(matches!(f.kind, K::Combo));
+                    entry["options"] = json!(f.options.iter().map(|(export, label)| json!([export, label])).collect::<Vec<_>>());
+                }
+                list.push(entry);
+            }
+        }
         serde_json::to_string(&list).map_err(|e| e.to_string())
     }
 
@@ -340,10 +354,12 @@ impl Document {
             FieldValue::Text(t.to_string())
         } else if let Some(c) = v["check"].as_bool() {
             FieldValue::Check(c)
+        } else if v.get("radio").is_some() {
+            FieldValue::Radio(v["radio"].as_str().map(str::to_string))
         } else if let Some(list) = v["choice"].as_array() {
             FieldValue::Choice(list.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
         } else {
-            return Err("a value is {\"text\": ...}, {\"check\": ...} or {\"choice\": [...]}".into());
+            return Err("a value is {\"text\": ...}, {\"check\": ...}, {\"radio\": ...} or {\"choice\": [...]}".into());
         };
         self.apply(Edit::SetFieldValue { name: name.to_string(), value })
     }

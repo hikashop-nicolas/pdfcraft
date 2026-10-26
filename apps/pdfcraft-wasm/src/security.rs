@@ -52,6 +52,11 @@ impl Document {
         self.apply(Edit::DeleteField { name: name.to_string() })
     }
 
+    /// Deletes one widget of a field (a radio group's button); a field with a single widget goes whole.
+    pub fn delete_field_widget(&mut self, name: &str, widget: usize) -> Result<(), String> {
+        self.apply(Edit::DeleteFieldWidget { name: name.to_string(), widget })
+    }
+
     /// Changes a field: `{"name"?, "tooltip"?, "required"?, "readOnly"?, "options"?, "fontSize"?, "box"?}`; the box
     /// (displayed points) moves and resizes its first widget.
     pub fn set_field_props(&mut self, name: &str, spec: &str) -> Result<(), String> {
@@ -61,8 +66,18 @@ impl Document {
             None | Some(Value::Null) => None,
             Some(_) => {
                 let b = boxed(&v, "box")?;
-                let page = self.doc()?.info.fields.iter().find(|f| f.name == name).and_then(|f| f.page).ok_or("that field is not on a page")?;
-                Some((0, self.page_info_ref(page)?.view_rect_to_user([b[0] as f32, b[1] as f32, b[2] as f32, b[3] as f32]).map(f64::from)))
+                let page = self
+                    .doc()?
+                    .form
+                    .iter()
+                    .find(|f| f.name == name)
+                    .and_then(|f| f.widgets.get(v["widget"].as_u64().map_or(0, |n| n as usize)))
+                    .and_then(|w| w.page)
+                    .ok_or("that field is not on a page")?;
+                Some((
+                    v["widget"].as_u64().map_or(0, |n| n as usize),
+                    self.page_info_ref(page)?.view_rect_to_user([b[0] as f32, b[1] as f32, b[2] as f32, b[3] as f32]).map(f64::from),
+                ))
             }
         };
         let props = FieldProps {
@@ -263,6 +278,37 @@ mod tests {
         assert!(doc.add_field(0, [0.0, 0.0, 10.0, 10.0], r#"{"type":"slider"}"#).is_err());
         assert!(doc.add_field(0, [0.0, 0.0, f64::NAN, 10.0], r#"{"type":"text"}"#).is_err());
         assert!(doc.add_field(3, [0.0, 0.0, 10.0, 10.0], r#"{"type":"text"}"#).is_err(), "no such page");
+    }
+
+    #[test]
+    fn radio_buttons_share_a_group_and_one_is_chosen() {
+        let mut doc = open(1);
+        doc.add_field(0, [20.0, 20.0, 36.0, 36.0], r#"{"type":"radio","export":"Small"}"#).expect("the first button");
+        let first: Vec<Value> = serde_json::from_str(&doc.fields_json(0).expect("fields")).expect("json");
+        let group = first[0]["name"].as_str().expect("a name").to_string();
+        for (i, export) in ["Medium", "Large"].iter().enumerate() {
+            let top = 50.0 + 30.0 * i as f64;
+            doc.add_field(0, [20.0, top, 36.0, top + 16.0], &format!(r#"{{"type":"radio","group":"{group}","export":"{export}"}}"#))
+                .expect("joins the group");
+        }
+        let buttons: Vec<Value> = serde_json::from_str(&doc.fields_json(0).expect("fields")).expect("json");
+        assert_eq!(buttons.len(), 3, "one entry per button");
+        assert!(buttons.iter().all(|b| b["name"] == group.as_str() && b["kind"] == "radio"));
+        let exports: Vec<&str> = buttons.iter().map(|b| b["export"].as_str().expect("export")).collect();
+        assert_eq!(exports, ["Small", "Medium", "Large"]);
+        doc.set_field(&group, r#"{"radio":"Medium"}"#).expect("chooses one");
+        let chosen: Vec<Value> = serde_json::from_str(&doc.fields_json(0).expect("fields")).expect("json");
+        let on: Vec<bool> = chosen.iter().map(|b| b["on"].as_bool().expect("on")).collect();
+        assert_eq!(on, [false, true, false], "only one is chosen");
+        doc.set_field(&group, r#"{"radio":"Large"}"#).expect("chooses another");
+        let again: Vec<Value> = serde_json::from_str(&doc.fields_json(0).expect("fields")).expect("json");
+        assert_eq!(again.iter().map(|b| b["on"].as_bool().expect("on")).collect::<Vec<_>>(), [false, false, true], "the other is cleared");
+        doc.set_field_props(&group, r#"{"widget":2,"box":[60,200,80,220]}"#).expect("moves the third button");
+        doc.delete_field_widget(&group, 1).expect("deletes the middle button");
+        let left: Vec<Value> = serde_json::from_str(&doc.fields_json(0).expect("fields")).expect("json");
+        assert_eq!(left.len(), 2, "the others stay");
+        assert!(doc.delete_field_widget("Nobody", 0).is_err());
+        assert!(doc.delete_field_widget(&group, 9).is_err());
     }
 
     #[test]

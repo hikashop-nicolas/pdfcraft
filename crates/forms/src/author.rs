@@ -1573,6 +1573,37 @@ pub fn delete_field(doc: &mut Document, name: &str) -> Result<(), FormError> {
     delete_found_field(doc, f)
 }
 
+/// Delete one widget of a field with several (one button of a radio group, say): it leaves its page and
+/// the field's kids, and the field stays. A field with a single widget is deleted whole.
+pub fn delete_widget(doc: &mut Document, name: &str, index: usize) -> Result<(), FormError> {
+    let f = fields(doc).into_iter().find(|f| f.name == name).ok_or_else(|| FormError::NoSuchField(name.into()))?;
+    let w = f.widgets.get(index).cloned().ok_or_else(|| FormError::Invalid(format!("{name} has no widget {}", index.saturating_add(1))))?;
+    if f.widgets.len() <= 1 || w.obj == f.obj {
+        return delete_found_field(doc, f);
+    }
+    for p in page_refs(doc) {
+        let Some(a) = doc.get(p).as_dict().and_then(|d| d.get(b"Annots").cloned()) else { continue };
+        let list = doc.resolve(&a).as_array().cloned().unwrap_or_default();
+        let kept: Vec<Object> = list.iter().filter(|o| o.as_ref() != Some(w.obj)).cloned().collect();
+        if kept.len() != list.len() {
+            match a.as_ref() {
+                Some(r) if doc.get(r).as_array().is_some() => doc.set(r, Object::Array(kept)),
+                _ => doc.update_dict(p, |d| d.set(b"Annots".to_vec(), Object::Array(kept)))?,
+            }
+        }
+    }
+    let kids = doc.get(f.obj).as_dict().and_then(|d| d.get(b"Kids").cloned());
+    if let Some(kids) = kids {
+        let list = doc.resolve(&kids).as_array().cloned().unwrap_or_default();
+        let kept: Vec<Object> = list.iter().filter(|o| o.as_ref() != Some(w.obj)).cloned().collect();
+        match kids.as_ref() {
+            Some(r) if doc.get(r).as_array().is_some() => doc.set(r, Object::Array(kept)),
+            _ => doc.update_dict(f.obj, |d| d.set(b"Kids".to_vec(), Object::Array(kept)))?,
+        }
+    }
+    drop_from_calculation_order(doc, |r| r == w.obj)
+}
+
 /// [`delete_field`] for the field object `obj`, when separate fields share one name.
 pub fn delete_field_object(doc: &mut Document, obj: ObjRef) -> Result<(), FormError> {
     let f = fields(doc).into_iter().find(|f| f.obj == obj).ok_or_else(|| FormError::NoSuchField(format!("{obj:?}")))?;
