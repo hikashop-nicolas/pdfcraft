@@ -246,6 +246,98 @@ impl Pdf {
         self.inner.delete_field_widget(name, widget).map_err(js)
     }
 
+    /// Marks areas of a page (displayed boxes, a flat list of x0, y0, x1, y1) for redaction; `overlay` shows on them once applied.
+    pub fn add_redaction(&mut self, page: usize, boxes: Vec<f64>, overlay: &str) -> Result<(), JsError> {
+        let boxes: Vec<[f64; 4]> = boxes.chunks_exact(4).map(|c| [c[0], c[1], c[2], c[3]]).collect();
+        self.inner.add_redaction(page, &boxes, overlay).map_err(js)
+    }
+
+    /// How many redaction marks wait to be applied.
+    pub fn redaction_count(&self) -> Result<usize, JsError> {
+        self.inner.redaction_count().map_err(js)
+    }
+
+    /// Removes for good what the redaction marks cover.
+    pub fn apply_redactions(&mut self) -> Result<(), JsError> {
+        self.inner.apply_redactions().map_err(js)
+    }
+
+    pub fn clear_redactions(&mut self) -> Result<(), JsError> {
+        self.inner.clear_redactions().map_err(js)
+    }
+
+    /// What each kind of hidden information would remove, as JSON.
+    pub fn hidden_info(&self) -> Result<String, JsError> {
+        self.inner.hidden_info_json().map_err(js)
+    }
+
+    pub fn remove_hidden(&mut self, ids: Vec<String>) -> Result<(), JsError> {
+        self.inner.remove_hidden(&ids).map_err(js)
+    }
+
+    /// A watermark from a JSON description, with an optional picture in place of the text.
+    pub fn add_watermark(&mut self, spec: &str, name: Option<String>, bytes: Option<Vec<u8>>) -> Result<(), JsError> {
+        self.inner.add_watermark(spec, name.zip(bytes)).map_err(js)
+    }
+
+    /// A header and footer from a JSON description.
+    pub fn add_header_footer(&mut self, spec: &str) -> Result<(), JsError> {
+        self.inner.add_header_footer(spec).map_err(js)
+    }
+
+    /// A page background from a JSON description, with an optional picture in place of the colour.
+    pub fn add_background(&mut self, spec: &str, name: Option<String>, bytes: Option<Vec<u8>>) -> Result<(), JsError> {
+        self.inner.add_background(spec, name.zip(bytes)).map_err(js)
+    }
+
+    /// Removes every mark of a kind: `headerFooter`, `watermark` or `background`.
+    pub fn remove_marks(&mut self, kind: &str) -> Result<(), JsError> {
+        self.inner.remove_marks(kind).map_err(js)
+    }
+
+    /// The bookmarks as JSON.
+    pub fn bookmarks(&self) -> Result<String, JsError> {
+        self.inner.bookmarks_json().map_err(js)
+    }
+
+    pub fn add_bookmark(&mut self, parent: &str, index: usize, title: &str, page: usize) -> Result<(), JsError> {
+        self.inner.add_bookmark(parent, index, title, page).map_err(js)
+    }
+
+    pub fn rename_bookmark(&mut self, path: &str, title: &str) -> Result<(), JsError> {
+        self.inner.rename_bookmark(path, title).map_err(js)
+    }
+
+    pub fn delete_bookmark(&mut self, path: &str) -> Result<(), JsError> {
+        self.inner.delete_bookmark(path).map_err(js)
+    }
+
+    pub fn move_bookmark(&mut self, from: &str, to_parent: &str, index: usize) -> Result<(), JsError> {
+        self.inner.move_bookmark(from, to_parent, index).map_err(js)
+    }
+
+    pub fn set_bookmark_page(&mut self, path: &str, page: usize) -> Result<(), JsError> {
+        self.inner.set_bookmark_page(path, page).map_err(js)
+    }
+
+    /// The attached files as JSON.
+    pub fn attachments(&self) -> Result<String, JsError> {
+        self.inner.attachments_json().map_err(js)
+    }
+
+    pub fn add_attachment(&mut self, name: &str, bytes: &[u8], description: Option<String>) -> Result<(), JsError> {
+        self.inner.add_attachment(name, bytes, description).map_err(js)
+    }
+
+    pub fn delete_attachment(&mut self, key: &str) -> Result<(), JsError> {
+        self.inner.delete_attachment(key).map_err(js)
+    }
+
+    /// The bytes of attachment `index`.
+    pub fn attachment_bytes(&self, index: usize) -> Result<Vec<u8>, JsError> {
+        self.inner.attachment_bytes(index).map_err(js)
+    }
+
     /// A field's actions per trigger, as JSON.
     pub fn field_actions(&self, name: &str) -> Result<String, JsError> {
         self.inner.field_actions_json(name).map_err(js)
