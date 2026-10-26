@@ -361,6 +361,8 @@ fn type3_font(clusters: &[&ShapedCluster], outlines: &HashMap<(ShapedScript, u32
                 ShapedScript::Arabic => "Arabic",
                 ShapedScript::Hebrew => "Hebrew",
                 ShapedScript::Thai => "Thai",
+                ShapedScript::Latin => "Latin",
+                ShapedScript::Cjk => "CJK",
             },
             |f| f.family,
         ),

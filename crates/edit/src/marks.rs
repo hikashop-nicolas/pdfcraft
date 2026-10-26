@@ -1,4 +1,4 @@
-use pdfcraft_fonts::shaped_text::{Piece, ShapedFonts, clusters, first_undrawable_in_line, is_thai, thai_message, thai_pieces};
+use pdfcraft_fonts::shaped_text::{Piece, ShapedFonts, clusters, is_thai, thai_message, thai_pieces};
 
 use super::{Dict, Document, EditError, Object, Rgb, added};
 
@@ -141,7 +141,7 @@ impl HeaderFooter {
     /// `expand`'s output is, covers every page (and a `\r` that would be drawn is refused too).
     /// The dialog asks this too, so its preview never offers text that applying refuses (#2013).
     pub fn first_undrawable(&self) -> Option<char> {
-        self.text.iter().flat_map(|t| t.lines()).find_map(first_undrawable_in_line)
+        self.text.iter().flat_map(|t| t.lines()).find_map(added::first_unmarkable)
     }
 
     /// The room the header and the footer take at the top and the bottom of a page, in points:
@@ -219,7 +219,7 @@ impl Watermark {
     pub fn first_undrawable(&self) -> Option<char> {
         match self.source {
             Some(_) => None,
-            None => self.text.trim().lines().find_map(first_undrawable_in_line),
+            None => self.text.trim().lines().find_map(added::first_unmarkable),
         }
     }
 }

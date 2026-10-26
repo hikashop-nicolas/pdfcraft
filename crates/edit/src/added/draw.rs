@@ -1,5 +1,6 @@
 use super::layout::{
-    Piece, arabic_error, hebrew_error, is_arabic, is_hebrew, is_thai, latin_width, norm, shaped_layout, text_rect, thai_error, wrapped,
+    Piece, arabic_error, fallback_error, fallback_script, hebrew_error, is_arabic, is_hebrew, is_thai, latin_width, norm, shaped_layout, text_rect,
+    thai_error, wrapped,
 };
 use super::types::{AddedText, Align, Family, Ink};
 use super::{
@@ -48,6 +49,33 @@ fn draw_shaped(doc: &mut Document, t: &AddedText, taken: &Dict, fonts: &mut Dict
     draw_laid_shaped(doc, t, &laid, taken, fonts, out, shaped_glyph)
 }
 
+/// Content operators for one line of a page mark, its left edge at `x` and its baseline at `y` (display
+/// space), with the fonts they use (Type 3 glyph fonts and the Helvetica the line's Latin runs take)
+/// for the page's resources. `taken` holds the fonts the page already draws with.
+pub(crate) fn mark_line(
+    doc: &mut Document,
+    text: &str,
+    size: f64,
+    color: [f64; 3],
+    x: f64,
+    y: f64,
+    taken: &Dict,
+) -> Result<(Vec<u8>, Dict), EditError> {
+    let top = y + 0.95 * size;
+    let t = AddedText { rect: [x, top - size * 1.2, x + 1.0e6, top], text: text.to_string(), size, color, ..AddedText::default() };
+    let base = t.family.base_font(false, false);
+    let mut font = Dict::new();
+    font.set(b"Type".to_vec(), Object::name("Font"));
+    font.set(b"Subtype".to_vec(), Object::name("Type1"));
+    font.set(b"BaseFont".to_vec(), Object::name(base));
+    font.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
+    let mut fonts = Dict::new();
+    fonts.set(font_name(base).into_bytes(), Object::Dict(font));
+    let mut out = Vec::new();
+    draw_shaped(doc, &t, taken, &mut fonts, &mut out)?;
+    Ok((out, fonts))
+}
+
 /// [`draw_shaped`] for lines that are already laid out. `outline` is the source of glyph outlines
 /// for a script's face (the craft-fonts faces, or a stand-in in tests).
 pub(super) fn draw_laid_shaped(
@@ -69,6 +97,7 @@ pub(super) fn draw_laid_shaped(
             ShapedScript::Arabic => arabic_error(e, &c.text),
             ShapedScript::Hebrew => hebrew_error(e, &c.text),
             ShapedScript::Thai => thai_error(e, &c.text),
+            ShapedScript::Latin | ShapedScript::Cjk => fallback_error(e, &c.text),
         })?;
     out.extend(format!("BT {}\n", t.fill_op()).bytes());
     if t.char_spacing != 0.0 {
@@ -136,6 +165,7 @@ pub(super) fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict
             if t.text.chars().any(is_thai)
                 || face_or_new(is_arabic, pdfcraft_fonts::document_arabic_font().is_some())
                 || face_or_new(is_hebrew, pdfcraft_fonts::document_hebrew_font(false).is_some())
+                || t.text.chars().any(|c| fallback_script(c).is_some())
             {
                 draw_shaped(doc, t, taken, &mut fonts, &mut out)?;
                 res.set(b"Font".to_vec(), Object::Dict(fonts));
