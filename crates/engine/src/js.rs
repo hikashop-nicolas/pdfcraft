@@ -234,6 +234,11 @@ impl crate::Document {
         self.editor.as_ref().and_then(|e| pdfcraft_forms::field_actions(&e.cos, name).ok()).unwrap_or_default()
     }
 
+    /// Field Properties ▸ Format / Validate / Calculate: field `name`'s custom scripts as (event, source).
+    pub fn field_scripts(&self, name: &str) -> Vec<(&'static str, String)> {
+        self.editor.as_ref().and_then(|e| pdfcraft_forms::field_scripts(&e.cos, name).ok()).unwrap_or_default()
+    }
+
     /// Field Properties ▸ Actions: how many actions are chained after each trigger's first one.
     pub fn field_action_chains(&self, name: &str) -> Vec<(pdfcraft_forms::Trigger, usize)> {
         self.editor.as_ref().and_then(|e| pdfcraft_forms::field_action_chains(&e.cos, name).ok()).unwrap_or_default()

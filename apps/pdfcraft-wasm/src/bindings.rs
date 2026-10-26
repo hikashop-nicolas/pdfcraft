@@ -255,6 +255,16 @@ impl Pdf {
         self.inner.set_field_actions(name, actions).map_err(js)
     }
 
+    /// A field's keystroke, format, validate and calculate scripts, as JSON.
+    pub fn field_scripts(&self, name: &str) -> Result<String, JsError> {
+        self.inner.field_scripts_json(name).map_err(js)
+    }
+
+    /// Sets a field's script for `event` (keystroke, format, validate, calculate); an empty one removes it.
+    pub fn set_field_script(&mut self, name: &str, event: &str, script: &str) -> Result<(), JsError> {
+        self.inner.set_field_script(name, event, script).map_err(js)
+    }
+
     /// Runs a script (a button click on `target`) and returns what it printed and asked for, as JSON.
     pub fn run_javascript(&mut self, script: &str, target: Option<String>) -> Result<String, JsError> {
         self.inner.run_javascript(script, target.as_deref()).map_err(js)

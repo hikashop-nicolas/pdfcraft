@@ -35,6 +35,7 @@ fn parse_action(v: &Value) -> Result<FieldAction, String> {
         "goto" => FieldAction::GoTo(v["page"].as_u64().ok_or("a page number")? as usize),
         "showhide" => FieldAction::ShowHide { fields: list(v, "fields"), hide: v["hide"].as_bool().unwrap_or(true) },
         "submit" => FieldAction::Submit(text("url")),
+        "other" => FieldAction::Other(text("text")),
         other => return Err(format!("unknown action {other:?}")),
     })
 }
@@ -95,6 +96,18 @@ impl Document {
             out.push((t, parse_action(a)?));
         }
         self.apply(Edit::SetFieldActions { name: name.to_string(), actions: out })
+    }
+
+    /// A field's custom scripts as JSON, `{"keystroke"?, "format"?, "validate"?, "calculate"?}`.
+    pub fn field_scripts_json(&self, name: &str) -> Result<String, String> {
+        let map: serde_json::Map<String, Value> = self.doc()?.field_scripts(name).into_iter().map(|(k, v)| (k.to_string(), json!(v))).collect();
+        Ok(Value::Object(map).to_string())
+    }
+
+    /// Sets or removes (an empty script) the script a field runs for `event`: keystroke, format, validate, calculate or mouse_up.
+    pub fn set_field_script(&mut self, name: &str, event: &str, script: &str) -> Result<(), String> {
+        let script = (!script.trim().is_empty()).then(|| script.to_string());
+        self.apply(Edit::SetFieldScript { name: name.to_string(), event: event.to_string(), script })
     }
 
     /// Runs a script as `target` field's button click (or on its own); field changes are applied as one step.
@@ -177,6 +190,20 @@ mod tests {
         assert_eq!(link["requests"][0]["url"], "https://example.org");
         doc.set_field_actions("Go", "[]").expect("clears them");
         assert_eq!(doc.field_actions_json("Go").expect("lists them"), "[]");
+    }
+
+    #[test]
+    fn a_field_keeps_a_calculate_script() {
+        let mut doc = open();
+        doc.set_field("Qty", r#"{"text":"3"}"#).expect("fills it");
+        doc.set_field_script("Total", "calculate", "event.value = Number(this.getField('Qty').value) * 2;").expect("sets it");
+        let scripts: Value = serde_json::from_str(&doc.field_scripts_json("Total").expect("reads them")).expect("json");
+        assert!(scripts["calculate"].as_str().is_some_and(|s| s.contains("getField")), "{scripts}");
+        assert_eq!(value_of(&doc, "Total").as_deref(), Some("6"), "the total follows the quantity");
+        doc.set_field("Qty", r#"{"text":"5"}"#).expect("changes it");
+        assert_eq!(value_of(&doc, "Total").as_deref(), Some("10"));
+        doc.set_field_script("Total", "calculate", "").expect("removes it");
+        assert_eq!(doc.field_scripts_json("Total").expect("reads them"), "{}");
     }
 
     #[test]
