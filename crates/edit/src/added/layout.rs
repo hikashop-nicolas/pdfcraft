@@ -1,7 +1,7 @@
 use super::types::{AddedImage, AddedText};
 use super::{
-    Content, Document, EditError, GlyphError, Level, ObjRef, Object, ParagraphBidiInfo, ShapedScript, shape_arabic, shape_cjk, shape_hebrew,
-    shape_latin, shape_thai,
+    Content, Document, EditError, GlyphError, Level, ObjRef, Object, ParagraphBidiInfo, ShapedScript, shape_arabic, shape_cjk, shape_hans,
+    shape_hebrew, shape_latin, shape_thai,
 };
 
 pub(super) fn nums(doc: &Document, o: Option<&Object>) -> Vec<f64> {
@@ -245,9 +245,26 @@ pub(super) fn fallback_script(c: char) -> Option<ShapedScript> {
         Some(ShapedScript::Latin)
     } else if pdfcraft_fonts::cjk_has(c) {
         Some(ShapedScript::Cjk)
+    } else if pdfcraft_fonts::hans_has(c) {
+        Some(ShapedScript::Hans)
     } else {
         None
     }
+}
+
+/// [`fallback_script`] for a text that [`prefer_hans`]: its hanzi come from the Chinese face when it has them,
+/// so one text does not mix the Japanese and Chinese forms of a character.
+fn fallback_script_in(c: char, chinese: bool) -> Option<ShapedScript> {
+    match fallback_script(c) {
+        Some(ShapedScript::Cjk) if chinese && pdfcraft_fonts::hans_has(c) => Some(ShapedScript::Hans),
+        other => other,
+    }
+}
+
+/// Whether `text` is Chinese rather than Japanese: no kana, and a hanzi that only the Chinese face has.
+fn prefer_hans(text: &str) -> bool {
+    !text.chars().any(|c| matches!(u32::from(c), 0x3040..=0x30FF | 0x31F0..=0x31FF))
+        && text.chars().any(|c| pdfcraft_fonts::hans_has(c) && !pdfcraft_fonts::cjk_has(c) && !pdfcraft_fonts::latin_has(c))
 }
 
 /// Whether `text` has characters the standard fonts lack that the fallback faces draw (Cyrillic, Greek, Japanese, Chinese...).
@@ -269,7 +286,7 @@ pub(crate) fn mark_line_width(text: &str, size: f64) -> f64 {
 
 /// Whether `c` is a Japanese or Chinese character, which a line may break after.
 fn is_cjk_char(c: char) -> bool {
-    fallback_script(c) == Some(ShapedScript::Cjk)
+    matches!(fallback_script(c), Some(ShapedScript::Cjk | ShapedScript::Hans))
 }
 
 pub(super) fn fallback_error(e: GlyphError, text: &str) -> EditError {
@@ -355,6 +372,7 @@ pub(super) fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec
         return Ok((Vec::new(), 0.0));
     }
     let base = if rtl { Level::rtl() } else { Level::ltr() };
+    let chinese = prefer_hans(&t.text);
     let info = ParagraphBidiInfo::new(line, Some(base));
     let (levels, runs) = info.visual_runs(0..line.len());
     let mut pieces = Vec::new();
@@ -375,7 +393,7 @@ pub(super) fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec
             } else if is_arabic(c) || (run_rtl && !c.is_alphanumeric() && pdfcraft_fonts::arabic_has(c)) {
                 Some(ShapedScript::Arabic)
             } else {
-                fallback_script(c)
+                fallback_script_in(c, chinese)
             };
             match segments.last_mut() {
                 Some((kind, s)) if *kind == script => s.push(c),
@@ -393,6 +411,7 @@ pub(super) fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec
                     ShapedScript::Thai => shape_thai(&s).map_err(|e| thai_error(e, &s))?,
                     ShapedScript::Latin => shape_latin(&s).map_err(|e| fallback_error(e, &s))?,
                     ShapedScript::Cjk => shape_cjk(&s).map_err(|e| fallback_error(e, &s))?,
+                    ShapedScript::Hans => shape_hans(&s).map_err(|e| fallback_error(e, &s))?,
                 };
                 Piece::Shaped(shaped)
             } else if run_rtl {

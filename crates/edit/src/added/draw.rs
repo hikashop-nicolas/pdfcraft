@@ -97,7 +97,7 @@ pub(super) fn draw_laid_shaped(
             ShapedScript::Arabic => arabic_error(e, &c.text),
             ShapedScript::Hebrew => hebrew_error(e, &c.text),
             ShapedScript::Thai => thai_error(e, &c.text),
-            ShapedScript::Latin | ShapedScript::Cjk => fallback_error(e, &c.text),
+            ShapedScript::Latin | ShapedScript::Cjk | ShapedScript::Hans => fallback_error(e, &c.text),
         })?;
     out.extend(format!("BT {}\n", t.fill_op()).bytes());
     if t.char_spacing != 0.0 {

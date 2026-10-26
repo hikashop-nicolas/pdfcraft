@@ -10,7 +10,8 @@
 
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 use pdfcraft_fonts::{
-    GlyphError, GlyphOutline, ShapedScript, Std14, literal, shape_arabic, shape_cjk, shape_hebrew, shape_latin, shape_thai, shaped_glyph, win_ansi,
+    GlyphError, GlyphOutline, ShapedScript, Std14, literal, shape_arabic, shape_cjk, shape_hans, shape_hebrew, shape_latin, shape_thai, shaped_glyph,
+    win_ansi,
 };
 use unicode_bidi::{Level, ParagraphBidiInfo};
 
