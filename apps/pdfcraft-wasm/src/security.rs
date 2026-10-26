@@ -57,8 +57,8 @@ impl Document {
         self.apply(Edit::DeleteFieldWidget { name: name.to_string(), widget })
     }
 
-    /// Changes a field: `{"name"?, "tooltip"?, "required"?, "readOnly"?, "options"?, "fontSize"?, "box"?}`; the box
-    /// (displayed points) moves and resizes its first widget.
+    /// Changes a field: `{"name"?, "tooltip"?, "required"?, "readOnly"?, "options"?, "fontSize"?, "caption"?, "box"?}`; the box
+    /// (displayed points) moves and resizes one widget (`"widget"`, the first by default), and the caption is a push button's label.
     pub fn set_field_props(&mut self, name: &str, spec: &str) -> Result<(), String> {
         let v: Value = serde_json::from_str(spec).map_err(|e| e.to_string())?;
         // where its first widget is: a displayed box, as the other calls take
@@ -88,6 +88,7 @@ impl Document {
             read_only: v["readOnly"].as_bool(),
             options: v.get("options").map(|_| strings(&v, "options")),
             font_size: v["fontSize"].as_f64().filter(|n| n.is_finite() && (0.0..=200.0).contains(n)),
+            caption: v["caption"].as_str().map(|c| (v["widget"].as_u64().map_or(0, |n| n as usize), c.to_string())),
             ..FieldProps::default()
         };
         self.apply(Edit::SetFieldProps { name: name.to_string(), props: Box::new(props) })

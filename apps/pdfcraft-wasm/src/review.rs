@@ -336,6 +336,9 @@ impl Document {
                     entry["on"] = json!(w.state.is_some() && w.state == w.on_state);
                     entry["export"] = json!(w.on_state);
                 }
+                if matches!(f.kind, K::PushButton) {
+                    entry["caption"] = json!(w.caption);
+                }
                 if matches!(f.kind, K::Combo | K::List) {
                     entry["combo"] = json!(matches!(f.kind, K::Combo));
                     entry["options"] = json!(f.options.iter().map(|(export, label)| json!([export, label])).collect::<Vec<_>>());

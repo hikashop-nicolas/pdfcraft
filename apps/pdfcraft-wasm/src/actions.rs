@@ -165,6 +165,11 @@ mod tests {
         doc
     }
 
+    fn caption_of(doc: &Document, name: &str) -> Option<String> {
+        let fields: Vec<Value> = serde_json::from_str(&doc.fields_json(0).expect("fields")).expect("json");
+        fields.iter().find(|f| f["name"] == name).and_then(|f| f["caption"].as_str().map(str::to_string))
+    }
+
     fn value_of(doc: &Document, name: &str) -> Option<String> {
         let fields: Vec<Value> = serde_json::from_str(&doc.fields_json(0).expect("fields")).expect("json");
         fields.iter().find(|f| f["name"] == name).and_then(|f| f["value"].as_str().map(str::to_string))
@@ -188,6 +193,8 @@ mod tests {
         assert_eq!(value_of(&doc, "Qty").as_deref().unwrap_or(""), "");
         let link: Value = serde_json::from_str(&doc.run_action(r#"{"kind":"uri","url":"https://example.org"}"#, None).expect("link")).expect("json");
         assert_eq!(link["requests"][0]["url"], "https://example.org");
+        doc.set_field_props("Go", r#"{"caption":"Send it"}"#).expect("relabels it");
+        assert_eq!(caption_of(&doc, "Go").as_deref(), Some("Send it"));
         doc.set_field_actions("Go", "[]").expect("clears them");
         assert_eq!(doc.field_actions_json("Go").expect("lists them"), "[]");
     }
