@@ -100,7 +100,7 @@ impl HeaderFooter {
     /// (and a `\r` that would be drawn is refused too). The dialog asks this too, so its preview
     /// never offers text that applying refuses (#2013).
     pub fn first_undrawable(&self) -> Option<char> {
-        self.text.iter().flat_map(|t| t.lines()).find_map(pdfcraft_fonts::first_non_win_ansi)
+        self.text.iter().flat_map(|t| t.lines()).find_map(added::first_unmarkable)
     }
 
     /// The room the header and the footer take at the top and the bottom of a page, in points:
@@ -177,7 +177,7 @@ impl Watermark {
     pub fn first_undrawable(&self) -> Option<char> {
         match self.source {
             Some(_) => None,
-            None => self.text.trim().lines().find_map(pdfcraft_fonts::first_non_win_ansi),
+            None => self.text.trim().lines().find_map(added::first_unmarkable),
         }
     }
 }
@@ -367,6 +367,21 @@ fn add_resources(doc: &mut Document, page: &pdfcraft_model::Page, opacity: Optio
         faces.push((name.to_vec(), base));
     }
     add_page_resources(doc, page, opacity, &faces)
+}
+
+/// Add already-made font dictionaries (name, font) to the page's own resources.
+fn add_page_fonts(doc: &mut Document, page: &pdfcraft_model::Page, extra: &Dict) -> Result<(), EditError> {
+    if extra.is_empty() {
+        return Ok(());
+    }
+    let mut res = page.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
+    let mut fonts = res.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
+    for (name, font) in extra.iter() {
+        fonts.set(name.clone(), font.clone());
+    }
+    res.set(b"Font".to_vec(), Object::Dict(fonts));
+    doc.update_dict(page.obj, |d| d.set(b"Resources".to_vec(), Object::Dict(res)))?;
+    Ok(())
 }
 
 /// The fonts a page draws with: its own resources' or the ones it inherits.
@@ -811,6 +826,10 @@ pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter,
         let resource = free_font_name(doc, &page_fonts(doc, page), preferred, base);
         let mut body: Vec<u8> = format!("BT\n/{resource} {} Tf\n{}\n", n(size), rgb(hf.color)).into_bytes();
         let mut underlines = String::new();
+        // lines with letters the standard fonts lack are drawn apart, from the fallback faces
+        let mut fallback: Vec<u8> = Vec::new();
+        let mut fallback_fonts = Dict::new();
+        let taken = page_fonts(doc, page);
         for (slot, template) in hf.text.iter().enumerate() {
             if template.trim().is_empty() {
                 continue;
@@ -820,7 +839,8 @@ pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter,
             let line_h = size * 1.2;
             for (li, line) in lines.iter().enumerate() {
                 // Centred and right-aligned text is placed by its width in the chosen face.
-                let tw = hf.font.width(line, size, false, false);
+                let drawn_apart = added::needs_fallback_face(line);
+                let tw = if drawn_apart { added::mark_line_width(line, size) } else { hf.font.width(line, size, false, false) };
                 let x = match slot % 3 {
                     0 => left,
                     1 => (w - tw) / 2.0,
@@ -828,13 +848,27 @@ pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter,
                 };
                 // Headers hang below the top margin; footers sit on the bottom margin.
                 let y = if header { h - top - size * 0.8 - li as f64 * line_h } else { bottom + (lines.len() - 1 - li) as f64 * line_h };
-                body.extend(text_op(x, y, line));
+                if drawn_apart {
+                    let mut seen = taken.clone();
+                    for (name, font) in fallback_fonts.iter() {
+                        seen.set(name.clone(), font.clone());
+                    }
+                    let (ops, fonts) = added::mark_line(doc, line, size, hf.color, x, y, &seen)?;
+                    fallback.extend(format!("{}\n", rgb(hf.color)).bytes());
+                    fallback.extend(ops);
+                    for (name, font) in fonts.iter() {
+                        fallback_fonts.set(name.clone(), font.clone());
+                    }
+                } else {
+                    body.extend(text_op(x, y, line));
+                }
                 if hf.underline {
                     underlines.push_str(&format!("{} {} {} {} re f\n", n(x), n(y - size * 0.15), n(tw), n((size * 0.06).max(0.4))));
                 }
             }
         }
         body.extend_from_slice(b"ET\n");
+        body.extend(fallback);
         if !underlines.is_empty() {
             body.extend(format!("{}\n{underlines}", rgb(hf.color)).bytes());
         }
@@ -845,6 +879,7 @@ pub fn add_header_footer(doc: &mut Document, pages: &[usize], hf: &HeaderFooter,
         if !page_fonts(doc, page).contains(resource.as_bytes()) {
             add_page_resources(doc, page, None, &[(resource.into_bytes(), base)])?;
         }
+        add_page_fonts(doc, &page_list(doc)[i].clone(), &fallback_fonts)?;
         let page = &page_list(doc)[i];
         place(doc, page, MarkKind::HeaderFooter, content, false)?;
         if let Some(Some(m)) = shrinks.get(k) {
@@ -899,7 +934,11 @@ pub fn add_watermark(doc: &mut Document, pages: &[usize], wm: &Watermark, replac
             place(doc, page, MarkKind::Watermark, content.into_bytes(), wm.behind)?;
             continue;
         }
-        let widest = lines.iter().map(|l| helvetica_width(l, 1.0)).fold(0.0, f64::max).max(0.01);
+        let widest = lines
+            .iter()
+            .map(|l| if added::needs_fallback_face(l) { added::mark_line_width(l, 1.0) } else { helvetica_width(l, 1.0) })
+            .fold(0.0, f64::max)
+            .max(0.01);
         let size = if wm.font_size > 0.0 { wm.font_size } else { ((w * w + h * h).sqrt() * 0.5 / widest).clamp(6.0, 300.0) };
         let (s, c) = wm.rotation.to_radians().sin_cos();
         let (cx, cy) = (w / 2.0 + wm.offset[0], h / 2.0 + wm.offset[1]);
@@ -921,13 +960,33 @@ pub fn add_watermark(doc: &mut Document, pages: &[usize], wm: &Watermark, replac
         );
         let line_h = size * 1.15;
         let total = line_h * (lines.len() as f64 - 1.0);
+        let mut fallback: Vec<u8> = Vec::new();
+        let mut fallback_fonts = Dict::new();
+        let taken = page_fonts(doc, &page);
         for (li, line) in lines.iter().enumerate() {
-            let tw = helvetica_width(line, size);
-            content.extend(text_op(-tw / 2.0, total / 2.0 - li as f64 * line_h - size * 0.35, line));
+            let y = total / 2.0 - li as f64 * line_h - size * 0.35;
+            if added::needs_fallback_face(line) {
+                let tw = added::mark_line_width(line, size);
+                let mut seen = taken.clone();
+                for (name, font) in fallback_fonts.iter() {
+                    seen.set(name.clone(), font.clone());
+                }
+                let (ops, fonts) = added::mark_line(doc, line, size, wm.color, -tw / 2.0, y, &seen)?;
+                fallback.extend(format!("{}\n", rgb(wm.color)).bytes());
+                fallback.extend(ops);
+                for (name, font) in fonts.iter() {
+                    fallback_fonts.set(name.clone(), font.clone());
+                }
+            } else {
+                let tw = helvetica_width(line, size);
+                content.extend(text_op(-tw / 2.0, y, line));
+            }
         }
         content.extend_from_slice(b"ET\n");
+        content.extend(fallback);
         content.extend_from_slice(END.as_bytes());
         add_resources(doc, &page, Some(opacity), None)?;
+        add_page_fonts(doc, &page_list(doc)[i].clone(), &fallback_fonts)?;
         let page = &page_list(doc)[i];
         place(doc, page, MarkKind::Watermark, content, wm.behind)?;
     }

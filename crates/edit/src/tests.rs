@@ -3684,12 +3684,13 @@ fn header_and_watermark_drawability_matches_what_applying_refuses() {
         ..HeaderFooter::default()
     };
     for (text, refused) in [
-        ("Страница <<1>> из 1 / Page <<1>> of 1", Some('С')),
+        ("Страница <<1>> из 1 / Page <<1>> of 1", None),
         ("TEST-001 <<Page 1 of n>>", None),
         ("Café — 5€ ™ <<Bates Number#6#1#ACME-#>>", None),
         ("Left\r\nRight", None),
         ("A\rB", Some('\r')),
-        ("line one\nΕλληνικά", Some('Ε')),
+        ("line one\nΕλληνικά", None),
+        ("안녕 <<1>>", Some('안')),
     ] {
         let hf = footer(text);
         assert_eq!(hf.first_undrawable(), refused, "{text:?}");
@@ -3716,10 +3717,10 @@ fn page_text_the_standard_fonts_cant_draw_is_refused() {
     let err = add_content(&mut doc, 0, &Content::Text(text)).unwrap_err().to_string();
     assert!(err.contains("\"日\" (U+65E5)"), "{err}");
     let hf = HeaderFooter {
-        text: ["Ελληνικά".into(), String::new(), String::new(), String::new(), String::new(), String::new()],
+        text: ["안녕".into(), String::new(), String::new(), String::new(), String::new(), String::new()],
         ..HeaderFooter::default()
     };
-    assert!(add_header_footer(&mut doc, &[0, 1], &hf, true, &cx()).unwrap_err().to_string().contains("U+0395"));
+    assert!(add_header_footer(&mut doc, &[0, 1], &hf, true, &cx()).unwrap_err().to_string().contains("U+C548"));
     let wm = Watermark { text: "机密".into(), ..Watermark::default() };
     assert!(add_watermark(&mut doc, &[0], &wm, true).unwrap_err().to_string().contains("U+673A"));
     let after: Vec<Vec<String>> = (0..3).map(|p| streams(&reopen(&doc), p)).collect();
@@ -4089,6 +4090,91 @@ fn added_thai_text_wraps_clusters_and_survives_reopen() {
     delete_content(&mut doc, 0, 0).unwrap();
     assert!(list_added(&doc).is_empty());
     assert!(arabic_font_names(&doc, 0).is_empty());
+}
+
+#[test]
+fn added_cyrillic_greek_and_polish_text_uses_the_bundled_face() {
+    let mut doc = fixture();
+    let t = AddedText {
+        rect: [20.0, 100.0, 250.0, 300.0], text: "Привет, мир! Ελληνικά Łódź 2026".into(), size: 16.0, ..AddedText::default()
+    };
+    assert_eq!(first_undrawable(&t), None);
+    add_content(&mut doc, 0, &Content::Text(t.clone())).unwrap();
+    let reopened = reopen(&doc);
+    assert_eq!(list_added(&reopened)[0].content, Content::Text(AddedText { rect: super::added::text_rect(&t), ..t.clone() }));
+    // each letter is mapped back to its character, so copy and search find the text
+    let p = &pdfcraft_model::pages(&reopened)[0];
+    let res = reopened.resolve(p.dict.get(b"Resources").unwrap());
+    let fonts = reopened.resolve(res.as_dict().unwrap().get(b"Font").unwrap()).as_dict().unwrap().clone();
+    let mut mapped = String::new();
+    for (_, v) in fonts.iter().filter(|(k, _)| k.starts_with(b"PCAr")) {
+        let f = reopened.resolve(v).as_dict().unwrap().clone();
+        assert_eq!(f.name(b"Subtype"), Some(&b"Type3"[..]));
+        mapped += &String::from_utf8_lossy(&stream_bytes(&reopened, f.get(b"ToUnicode").unwrap()).unwrap());
+    }
+    for letter in ["041F", "0440", "0395", "03BB", "0141"] {
+        assert!(mapped.contains(&format!("<{letter}>")), "{letter} in {mapped}");
+    }
+    // a narrow box wraps at the spaces, not inside a word
+    let narrow = AddedText { rect: [0.0, 0.0, 90.0, 200.0], text: "Привет мир Привет".into(), ..t.clone() };
+    let lines = super::added::lines(&narrow);
+    assert!(lines.len() >= 2 && lines.iter().all(|l| !l.starts_with(' ') && !l.ends_with(' ')), "{lines:?}");
+    assert_eq!(lines.join(" "), "Привет мир Привет");
+    // what no face has is still refused
+    let korean = AddedText { text: "안녕".into(), ..t };
+    assert_eq!(first_undrawable(&korean), Some('안'));
+}
+
+#[test]
+fn headers_footers_and_watermarks_draw_cyrillic_with_the_bundled_face() {
+    let mut doc = fixture();
+    let mut hf = HeaderFooter::default();
+    hf.text[0] = "Секретно".into();
+    hf.text[4] = "Страница <<1>> Éé".into();
+    assert_eq!(hf.first_undrawable(), None);
+    add_header_footer(&mut doc, &[0], &hf, false, &cx()).unwrap();
+    add_watermark(&mut doc, &[0], &Watermark { text: "ЧЕРНОВИК".into(), ..Watermark::default() }, false).unwrap();
+    let reopened = reopen(&doc);
+    // each letter is mapped back to its character, so copy and search find the text
+    let p = &pdfcraft_model::pages(&reopened)[0];
+    let res = reopened.resolve(p.dict.get(b"Resources").unwrap());
+    let fonts = reopened.resolve(res.as_dict().unwrap().get(b"Font").unwrap()).as_dict().unwrap().clone();
+    let mut mapped = String::new();
+    for (_, v) in fonts.iter().filter(|(k, _)| k.starts_with(b"PCAr")) {
+        let f = reopened.resolve(v).as_dict().unwrap().clone();
+        mapped += &String::from_utf8_lossy(&stream_bytes(&reopened, f.get(b"ToUnicode").unwrap()).unwrap());
+    }
+    for letter in ["0421", "0415", "0427"] {
+        assert!(mapped.contains(&format!("<{letter}>")), "{letter} in {mapped}");
+    }
+    let below = streams(&reopened, 0).concat();
+    assert!(below.contains("(") && below.contains("Tj"), "the Latin runs keep their standard font");
+    // what no face has is refused, before anything is drawn
+    let mut bad = HeaderFooter::default();
+    bad.text[0] = "안녕".into();
+    assert_eq!(bad.first_undrawable(), Some('안'));
+    let mut fresh = fixture();
+    assert!(add_header_footer(&mut fresh, &[0], &bad, false, &cx()).is_err());
+    assert!(!fresh.is_modified());
+}
+
+#[test]
+fn added_japanese_and_chinese_text_wraps_by_character() {
+    let mut doc = fixture();
+    let t = AddedText { rect: [20.0, 100.0, 120.0, 300.0], text: "こんにちは世界、你好".into(), size: 16.0, ..AddedText::default() };
+    if pdfcraft_fonts::document_japanese_font_for_style(false, false).is_none() {
+        eprintln!("skipping the CJK drawing checks: built without a craft-fonts Jpan face (set CRAFT_FONTS_DIR)");
+        assert_eq!(first_undrawable(&t), Some('こ'));
+        assert!(add_content(&mut doc, 0, &Content::Text(t)).is_err());
+        return;
+    }
+    assert_eq!(first_undrawable(&t), None);
+    add_content(&mut doc, 0, &Content::Text(t.clone())).unwrap();
+    let lines = super::added::lines(&t);
+    assert!(lines.len() >= 2, "a line of 16 point characters in a 100 point box breaks: {lines:?}");
+    assert_eq!(lines.concat(), t.text);
+    let reopened = reopen(&doc);
+    assert_eq!(list_added(&reopened)[0].content, Content::Text(AddedText { rect: super::added::text_rect(&t), ..t }));
 }
 
 #[test]

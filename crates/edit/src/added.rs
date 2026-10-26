@@ -12,7 +12,8 @@ use std::collections::{HashMap, HashSet};
 
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 use pdfcraft_fonts::{
-    GlyphError, GlyphOutline, ShapedCluster, ShapedScript, Std14, literal, shape_arabic, shape_hebrew, shape_thai, shaped_glyph, win_ansi,
+    GlyphError, GlyphOutline, ShapedCluster, ShapedScript, Std14, literal, shape_arabic, shape_cjk, shape_hebrew, shape_latin, shape_thai,
+    shaped_glyph, win_ansi,
 };
 use unicode_bidi::{Level, ParagraphBidiInfo};
 
@@ -298,6 +299,10 @@ fn wrapped(t: &AddedText) -> Vec<(String, bool)> {
         // Arabic or Hebrew: laid out with the bidirectional algorithm and shaped.
         let rtl_script = para.chars().any(|c| is_arabic(c) || is_hebrew(c));
         let thai = para.chars().any(is_thai);
+        if !rtl_script && !thai && para.chars().any(|c| fallback_script(c).is_some()) {
+            out.extend(fallback_lines(t, para, width).into_iter().map(|line| (line, false)));
+            continue;
+        }
         if thai
             && !rtl_script
             && let Ok(lines) = thai_lines(t, para, width)
@@ -414,6 +419,119 @@ pub fn first_undrawable(t: &AddedText) -> Option<char> {
 fn shaped_by_a_face(t: &AddedText) -> bool {
     (pdfcraft_fonts::document_arabic_font().is_some() && t.text.chars().any(is_arabic))
         || (pdfcraft_fonts::document_hebrew_font(false).is_some() && t.text.chars().any(is_hebrew))
+        || t.text.chars().any(|c| fallback_script(c).is_some())
+}
+
+/// The face that draws `c` when WinAnsi can't and it isn't Arabic, Hebrew or Thai: the bundled Inter for
+/// Latin, Greek and Cyrillic letters, else the Japanese craft-fonts face for what it has (kana, kanji, hanzi).
+fn fallback_script(c: char) -> Option<ShapedScript> {
+    if c.is_control() || pdfcraft_fonts::win_ansi_encodable(c) || is_thai(c) || is_hebrew(c) || is_arabic(c) || is_bidi_control(c) {
+        return None;
+    }
+    if pdfcraft_fonts::latin_has(c) {
+        Some(ShapedScript::Latin)
+    } else if pdfcraft_fonts::cjk_has(c) {
+        Some(ShapedScript::Cjk)
+    } else {
+        None
+    }
+}
+
+/// Whether `text` has characters the standard fonts lack that the fallback faces draw (Cyrillic, Greek, Japanese, Chinese...).
+pub(crate) fn needs_fallback_face(text: &str) -> bool {
+    text.chars().any(|c| fallback_script(c).is_some())
+}
+
+/// The first character of `text` that neither the standard fonts nor the fallback faces can draw.
+pub(crate) fn first_unmarkable(text: &str) -> Option<char> {
+    text.chars().find(|c| fallback_script(*c).is_none() && pdfcraft_fonts::first_non_win_ansi(&c.to_string()).is_some())
+}
+
+/// The width of one line at `size`, the fallback faces' glyphs included.
+pub(crate) fn mark_line_width(text: &str, size: f64) -> f64 {
+    let t = AddedText { text: text.to_string(), size, ..AddedText::default() };
+    shaped_layout(&t, text, false).map(|(_, w)| w).unwrap_or_else(|_| latin_width(&t, text))
+}
+
+/// Content operators for one line of a page mark, its left edge at `x` and its baseline at `y` (display
+/// space), with the fonts they use (Type 3 glyph fonts and the Helvetica the line's Latin runs take)
+/// for the page's resources. `taken` holds the fonts the page already draws with.
+pub(crate) fn mark_line(
+    doc: &mut Document,
+    text: &str,
+    size: f64,
+    color: [f64; 3],
+    x: f64,
+    y: f64,
+    taken: &Dict,
+) -> Result<(Vec<u8>, Dict), EditError> {
+    let top = y + 0.95 * size;
+    let t = AddedText { rect: [x, top - size * 1.2, x + 1.0e6, top], text: text.to_string(), size, color, ..AddedText::default() };
+    let base = t.family.base_font(false, false);
+    let mut font = Dict::new();
+    font.set(b"Type".to_vec(), Object::name("Font"));
+    font.set(b"Subtype".to_vec(), Object::name("Type1"));
+    font.set(b"BaseFont".to_vec(), Object::name(base));
+    font.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
+    let mut fonts = Dict::new();
+    fonts.set(font_name(base).into_bytes(), Object::Dict(font));
+    let mut out = Vec::new();
+    draw_shaped(doc, &t, taken, &mut fonts, &mut out)?;
+    Ok((out, fonts))
+}
+
+/// Whether `c` is a Japanese or Chinese character, which a line may break after.
+fn is_cjk_char(c: char) -> bool {
+    fallback_script(c) == Some(ShapedScript::Cjk)
+}
+
+fn fallback_error(e: GlyphError, text: &str) -> EditError {
+    EditError::Invalid(match e {
+        GlyphError::NoFont => "this text needs a font this build doesn't include (Japanese and Chinese come with PdfCraft's craft-fonts)".into(),
+        GlyphError::Missing => format!("no font here can show \"{text}\""),
+        GlyphError::TooComplex => format!("the font's glyphs for \"{text}\" are too complex"),
+    })
+}
+
+/// Wraps a paragraph that holds Cyrillic, Greek, Japanese or Chinese: a Japanese or Chinese character is a unit
+/// of its own, so is a word of any other text, and a space joins the unit after it.
+fn fallback_lines(t: &AddedText, para: &str, width: f64) -> Vec<String> {
+    let mut units: Vec<String> = Vec::new();
+    let mut word = String::new();
+    for c in para.chars() {
+        if c == ' ' {
+            if !word.is_empty() {
+                units.push(std::mem::take(&mut word));
+            }
+            units.push(" ".to_string());
+        } else if is_cjk_char(c) {
+            if !word.is_empty() {
+                units.push(std::mem::take(&mut word));
+            }
+            units.push(c.to_string());
+        } else {
+            word.push(c);
+        }
+    }
+    if !word.is_empty() {
+        units.push(word);
+    }
+    let mut lines = Vec::new();
+    let (mut line, mut used) = (String::new(), 0.0);
+    for unit in units {
+        let w = shaped_width(t, &unit, false);
+        if !line.is_empty() && used + w > width && unit != " " {
+            lines.push(std::mem::take(&mut line).trim_end().to_string());
+            used = 0.0;
+        }
+        if line.is_empty() && unit == " " && !lines.is_empty() {
+            continue;
+        }
+        line.push_str(&unit);
+        used += w;
+    }
+    lines.push(line);
+    lines
 }
 
 /// An Arabic character the face shapes and draws (U+061C, a direction mark, is dropped).
@@ -477,7 +595,7 @@ fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec<Piece>, f6
             } else if is_arabic(c) || (run_rtl && !c.is_alphanumeric() && pdfcraft_fonts::arabic_has(c)) {
                 Some(ShapedScript::Arabic)
             } else {
-                None
+                fallback_script(c)
             };
             match segments.last_mut() {
                 Some((kind, s)) if *kind == script => s.push(c),
@@ -493,6 +611,8 @@ fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec<Piece>, f6
                     ShapedScript::Arabic => shape_arabic(&s, run_rtl).map_err(|e| arabic_error(e, &s))?,
                     ShapedScript::Hebrew => shape_hebrew(&s, run_rtl).map_err(|e| hebrew_error(e, &s))?,
                     ShapedScript::Thai => shape_thai(&s).map_err(|e| thai_error(e, &s))?,
+                    ShapedScript::Latin => shape_latin(&s).map_err(|e| fallback_error(e, &s))?,
+                    ShapedScript::Cjk => shape_cjk(&s).map_err(|e| fallback_error(e, &s))?,
                 };
                 Piece::Shaped(shaped)
             } else if run_rtl {
@@ -675,6 +795,7 @@ fn draw_laid_shaped(
                     ShapedScript::Arabic => arabic_error(e, &c.text),
                     ShapedScript::Hebrew => hebrew_error(e, &c.text),
                     ShapedScript::Thai => thai_error(e, &c.text),
+                    ShapedScript::Latin | ShapedScript::Cjk => fallback_error(e, &c.text),
                 })?);
             }
         }
@@ -818,6 +939,8 @@ fn type3_shaped(doc: &mut Document, clusters: &[&ShapedCluster], outlines: &Hash
                 ShapedScript::Arabic => "Arabic",
                 ShapedScript::Hebrew => "Hebrew",
                 ShapedScript::Thai => "Thai",
+                ShapedScript::Latin => "Latin",
+                ShapedScript::Cjk => "CJK",
             },
             |f| f.family,
         ),
@@ -883,6 +1006,7 @@ fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict, existing:
             if t.text.chars().any(is_thai)
                 || face_or_new(is_arabic, pdfcraft_fonts::document_arabic_font().is_some())
                 || face_or_new(is_hebrew, pdfcraft_fonts::document_hebrew_font(false).is_some())
+                || t.text.chars().any(|c| fallback_script(c).is_some())
             {
                 draw_shaped(doc, t, taken, &mut fonts, &mut out)?;
                 res.set(b"Font".to_vec(), Object::Dict(fonts));
