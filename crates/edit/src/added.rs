@@ -449,7 +449,7 @@ fn fallback_script_in(c: char, chinese: bool) -> Option<ShapedScript> {
 }
 
 /// Whether `text` is Chinese rather than Japanese: no kana, and a hanzi that only the Chinese face has.
-fn prefer_hans(text: &str) -> bool {
+pub(crate) fn prefer_hans(text: &str) -> bool {
     !text.chars().any(|c| matches!(u32::from(c), 0x3040..=0x30FF | 0x31F0..=0x31FF))
         && text.chars().any(|c| pdfcraft_fonts::hans_has(c) && !pdfcraft_fonts::cjk_has(c) && !pdfcraft_fonts::latin_has(c))
 }

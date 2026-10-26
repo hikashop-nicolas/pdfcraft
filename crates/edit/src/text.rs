@@ -2195,8 +2195,16 @@ fn no_hebrew_font() -> EditError {
 fn type3_faces(text: &str, family: crate::added::Family, bold: bool) -> Result<(Vec<&'static CraftFont>, bool), EditError> {
     let japanese = pdfcraft_fonts::document_japanese_fonts_for_style(family == crate::added::Family::Times, bold);
     let latin = pdfcraft_fonts::document_latin_fonts(bold);
+    // The Chinese face (a small subset on the web) comes first for Chinese text, so its hanzi keep one
+    // look, and last for the rest, where it only completes what the others lack.
+    let hans = pdfcraft_fonts::ui_chinese_fonts();
     if !text.chars().any(crate::bidi::is_hebrew) {
-        return Ok((japanese.into_iter().chain(latin).collect(), false));
+        let faces = if crate::added::prefer_hans(text) {
+            hans.into_iter().chain(japanese).chain(latin).collect()
+        } else {
+            japanese.into_iter().chain(latin).chain(hans).collect()
+        };
+        return Ok((faces, false));
     }
     // Points are drawn on their letter with the font's positioning, which a one-glyph-per-
     // character Type 3 font can't do; refuse rather than print them beside the letter.
@@ -2204,7 +2212,7 @@ fn type3_faces(text: &str, family: crate::added::Family, bold: bool) -> Result<(
         return Err(EditError::Invalid("Hebrew points (niqqud) can't be written into a PDF yet; type the text without them".into()));
     }
     let hebrew = pdfcraft_fonts::document_hebrew_font(bold).ok_or_else(no_hebrew_font)?;
-    Ok((std::iter::once(hebrew).chain(japanese).chain(latin).collect(), true))
+    Ok((std::iter::once(hebrew).chain(japanese).chain(latin).chain(hans).collect(), true))
 }
 
 fn type3_font(
@@ -2232,7 +2240,9 @@ fn type3_font(
     // text keeps the Hebrew face and takes each character it lacks from the next face that has it.
     let face = if hebrew { faces.first().copied() } else { fallback_face(&faces, &chars, |face, ch| japanese_glyph_from(face, ch).is_ok()) }
         .ok_or_else(|| no_fallback_font(text))?;
-    let others: &[&CraftFont] = if hebrew { faces.get(1..).unwrap_or_default() } else { &[] };
+    // A character the chosen face lacks comes from the next face that has it.
+    let others: Vec<&CraftFont> =
+        if hebrew { faces.get(1..).unwrap_or_default().to_vec() } else { faces.iter().copied().filter(|f| !std::ptr::eq(*f, face)).collect() };
     // Every outline is read before the document is touched, so a character that fails leaves it
     // as it was. Each font takes the next `per_font` characters; codes restart at 1 in each.
     let per_font = max_glyphs.clamp(1, MAX_TYPE3_GLYPHS);

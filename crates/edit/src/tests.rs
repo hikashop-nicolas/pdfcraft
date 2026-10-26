@@ -1508,6 +1508,27 @@ fn japanese_line_fallback_uses_real_source_family_and_weight() {
 }
 
 #[test]
+fn simplified_chinese_replacement_text_takes_the_chinese_face_for_hanzi_the_japanese_face_lacks() {
+    if without_craft_fonts("simplified_chinese_replacement_text_takes_the_chinese_face_for_hanzi_the_japanese_face_lacks") {
+        return;
+    }
+    if !pdfcraft_fonts::hans_has('们') {
+        eprintln!("skipping: the craft-fonts input has no Hans face");
+        return;
+    }
+    // Chinese with ASCII digits, which the Chinese subset lacks: they come from the next face.
+    let replacement = "我们这里有 2026 个文档";
+    let mut doc = styled_text_page("Helvetica");
+    text::replace_block(&mut doc, 0, 0, replacement).unwrap();
+    assert_eq!(text::text_lines(&reopen(&doc), 0).unwrap()[0].text, replacement);
+    assert!(!fallback_paths(&doc).is_empty());
+    // a Japanese text keeps drawing from the Japanese face
+    let mut japanese = styled_text_page("Helvetica");
+    text::replace_block(&mut japanese, 0, 0, "見本商会　御中").unwrap();
+    assert_ne!(fallback_paths(&doc), fallback_paths(&japanese));
+}
+
+#[test]
 fn japanese_paragraph_fallback_honors_requested_family_and_weight() {
     if without_craft_fonts("japanese_paragraph_fallback_honors_requested_family_and_weight") {
         return;
@@ -1998,7 +2019,10 @@ fn japanese_replacement_missing_a_glyph_after_240_changes_nothing() {
     let faces = pdfcraft_fonts::document_japanese_fonts_for_style(false, false);
     let missing = (0x4E00u32..0x9FFF)
         .filter_map(char::from_u32)
-        .find(|ch| faces.iter().all(|face| pdfcraft_fonts::japanese_glyph_from(face, *ch).is_err()))
+        .find(|ch| {
+            faces.iter().all(|face| pdfcraft_fonts::japanese_glyph_from(face, *ch).is_err())
+                && pdfcraft_fonts::ui_chinese_fonts().iter().all(|face| pdfcraft_fonts::japanese_glyph_from(face, *ch).is_err())
+        })
         .expect("some CJK character is outside every face");
     let replacement = format!("{}{missing}", covered_japanese_chars(241));
     let mut doc = text_page("BT /F2 12 Tf 72 700 Td (ab) Tj ET");
