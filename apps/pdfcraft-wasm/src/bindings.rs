@@ -246,6 +246,34 @@ impl Pdf {
         self.inner.delete_field_widget(name, widget).map_err(js)
     }
 
+    /// A field's actions per trigger, as JSON.
+    pub fn field_actions(&self, name: &str) -> Result<String, JsError> {
+        self.inner.field_actions_json(name).map_err(js)
+    }
+
+    pub fn set_field_actions(&mut self, name: &str, actions: &str) -> Result<(), JsError> {
+        self.inner.set_field_actions(name, actions).map_err(js)
+    }
+
+    /// Runs a script (a button click on `target`) and returns what it printed and asked for, as JSON.
+    pub fn run_javascript(&mut self, script: &str, target: Option<String>) -> Result<String, JsError> {
+        self.inner.run_javascript(script, target.as_deref()).map_err(js)
+    }
+
+    /// Carries out an action (JSON as `field_actions` lists it) and returns what the page is to do, as JSON.
+    pub fn run_action(&mut self, action: &str, target: Option<String>) -> Result<String, JsError> {
+        self.inner.run_action(action, target.as_deref()).map_err(js)
+    }
+
+    /// What field scripts printed or asked for during edits since the last call, as JSON.
+    pub fn take_js_output(&mut self) -> String {
+        self.inner.take_js_output()
+    }
+
+    pub fn set_javascript(&mut self, on: bool) {
+        self.inner.set_javascript(on);
+    }
+
     pub fn set_field_props(&mut self, name: &str, spec: &str) -> Result<(), JsError> {
         self.inner.set_field_props(name, spec).map_err(js)
     }

@@ -1720,6 +1720,11 @@ pub enum Edit {
         event: String,
         script: Option<String>,
     },
+    /// Field Properties ▸ Actions: replace field `name`'s actions per trigger.
+    SetFieldActions {
+        name: String,
+        actions: Vec<(pdfcraft_forms::Trigger, pdfcraft_forms::FieldAction)>,
+    },
     /// Standards ▸ Save as PDF/A: fix what can be fixed for `level` (metadata, output intent,
     /// forbidden actions, annotation flags, …).
     ConvertPdfA {
@@ -2226,6 +2231,7 @@ impl Edit {
             Edit::ConvertPdfA { level } => Label::with("Save as {level}", level.label()),
             Edit::RemoveStandardId { standard } => Label::with("Remove {standard} identification", standard.label()),
             Edit::SetFieldScript { name, .. } => Label::with("Edit script of {name}", name.as_str()),
+            Edit::SetFieldActions { name, .. } => Label::with("Edit actions of {name}", name.as_str()),
             Edit::SetDocumentScript { script: None, .. } => Label::of("Delete document JavaScript"),
             Edit::SetDocumentScript { .. } => Label::of("Edit document JavaScript"),
             Edit::EditTextLine { .. } | Edit::EditTextBlock { .. } => Label::of("Edit text"),
@@ -2438,6 +2444,7 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
         | Edit::AddOcrText { .. }
         | Edit::SetDocumentScript { .. }
         | Edit::SetFieldScript { .. }
+        | Edit::SetFieldActions { .. }
         | Edit::RemoveStandardId { .. }
         | Edit::EditTextLine { .. }
         | Edit::EditTextBlock { .. }
@@ -2781,6 +2788,7 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
                 None => pdfcraft_forms::recalculate(doc)?,
             };
         }
+        Edit::SetFieldActions { name, actions } => pdfcraft_forms::set_field_actions(doc, name, actions)?,
         Edit::ConvertPdfA { level } => {
             pdfcraft_preflight::convert(doc, *level).map_err(|e| EditError::Invalid(e.to_string()))?;
         }
