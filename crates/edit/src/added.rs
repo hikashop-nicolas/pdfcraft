@@ -12,8 +12,8 @@ use std::collections::{HashMap, HashSet};
 
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 use pdfcraft_fonts::{
-    GlyphError, GlyphOutline, ShapedCluster, ShapedScript, Std14, literal, shape_arabic, shape_cjk, shape_hebrew, shape_latin, shape_thai,
-    shaped_glyph, win_ansi,
+    GlyphError, GlyphOutline, ShapedCluster, ShapedScript, Std14, literal, shape_arabic, shape_cjk, shape_hans, shape_hebrew, shape_latin,
+    shape_thai, shaped_glyph, win_ansi,
 };
 use unicode_bidi::{Level, ParagraphBidiInfo};
 
@@ -432,9 +432,26 @@ fn fallback_script(c: char) -> Option<ShapedScript> {
         Some(ShapedScript::Latin)
     } else if pdfcraft_fonts::cjk_has(c) {
         Some(ShapedScript::Cjk)
+    } else if pdfcraft_fonts::hans_has(c) {
+        Some(ShapedScript::Hans)
     } else {
         None
     }
+}
+
+/// [`fallback_script`] for a text that [`prefer_hans`]: its hanzi come from the Chinese face when it has them,
+/// so one text does not mix the Japanese and Chinese forms of a character.
+fn fallback_script_in(c: char, chinese: bool) -> Option<ShapedScript> {
+    match fallback_script(c) {
+        Some(ShapedScript::Cjk) if chinese && pdfcraft_fonts::hans_has(c) => Some(ShapedScript::Hans),
+        other => other,
+    }
+}
+
+/// Whether `text` is Chinese rather than Japanese: no kana, and a hanzi that only the Chinese face has.
+fn prefer_hans(text: &str) -> bool {
+    !text.chars().any(|c| matches!(u32::from(c), 0x3040..=0x30FF | 0x31F0..=0x31FF))
+        && text.chars().any(|c| pdfcraft_fonts::hans_has(c) && !pdfcraft_fonts::cjk_has(c) && !pdfcraft_fonts::latin_has(c))
 }
 
 /// Whether `text` has characters the standard fonts lack that the fallback faces draw (Cyrillic, Greek, Japanese, Chinese...).
@@ -482,7 +499,7 @@ pub(crate) fn mark_line(
 
 /// Whether `c` is a Japanese or Chinese character, which a line may break after.
 fn is_cjk_char(c: char) -> bool {
-    fallback_script(c) == Some(ShapedScript::Cjk)
+    matches!(fallback_script(c), Some(ShapedScript::Cjk | ShapedScript::Hans))
 }
 
 fn fallback_error(e: GlyphError, text: &str) -> EditError {
@@ -575,6 +592,7 @@ fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec<Piece>, f6
         return Ok((Vec::new(), 0.0));
     }
     let base = if rtl { Level::rtl() } else { Level::ltr() };
+    let chinese = prefer_hans(&t.text);
     let info = ParagraphBidiInfo::new(line, Some(base));
     let (levels, runs) = info.visual_runs(0..line.len());
     let mut pieces = Vec::new();
@@ -595,7 +613,7 @@ fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec<Piece>, f6
             } else if is_arabic(c) || (run_rtl && !c.is_alphanumeric() && pdfcraft_fonts::arabic_has(c)) {
                 Some(ShapedScript::Arabic)
             } else {
-                fallback_script(c)
+                fallback_script_in(c, chinese)
             };
             match segments.last_mut() {
                 Some((kind, s)) if *kind == script => s.push(c),
@@ -613,6 +631,7 @@ fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec<Piece>, f6
                     ShapedScript::Thai => shape_thai(&s).map_err(|e| thai_error(e, &s))?,
                     ShapedScript::Latin => shape_latin(&s).map_err(|e| fallback_error(e, &s))?,
                     ShapedScript::Cjk => shape_cjk(&s).map_err(|e| fallback_error(e, &s))?,
+                    ShapedScript::Hans => shape_hans(&s).map_err(|e| fallback_error(e, &s))?,
                 };
                 Piece::Shaped(shaped)
             } else if run_rtl {
@@ -795,7 +814,7 @@ fn draw_laid_shaped(
                     ShapedScript::Arabic => arabic_error(e, &c.text),
                     ShapedScript::Hebrew => hebrew_error(e, &c.text),
                     ShapedScript::Thai => thai_error(e, &c.text),
-                    ShapedScript::Latin | ShapedScript::Cjk => fallback_error(e, &c.text),
+                    ShapedScript::Latin | ShapedScript::Cjk | ShapedScript::Hans => fallback_error(e, &c.text),
                 })?);
             }
         }
@@ -941,6 +960,7 @@ fn type3_shaped(doc: &mut Document, clusters: &[&ShapedCluster], outlines: &Hash
                 ShapedScript::Thai => "Thai",
                 ShapedScript::Latin => "Latin",
                 ShapedScript::Cjk => "CJK",
+                ShapedScript::Hans => "Hans",
             },
             |f| f.family,
         ),

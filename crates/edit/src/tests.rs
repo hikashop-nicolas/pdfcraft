@@ -3713,16 +3713,16 @@ fn header_and_watermark_drawability_matches_what_applying_refuses() {
 fn page_text_the_standard_fonts_cant_draw_is_refused() {
     let mut doc = fixture();
     let before: Vec<Vec<String>> = (0..3).map(|p| streams(&reopen(&doc), p)).collect();
-    let text = AddedText { rect: [72.0, 600.0, 300.0, 700.0], text: "日本語のテキスト".into(), ..AddedText::default() };
+    let text = AddedText { rect: [72.0, 600.0, 300.0, 700.0], text: "한국어 텍스트".into(), ..AddedText::default() };
     let err = add_content(&mut doc, 0, &Content::Text(text)).unwrap_err().to_string();
-    assert!(err.contains("\"日\" (U+65E5)"), "{err}");
+    assert!(err.contains("\"한\" (U+D55C)"), "{err}");
     let hf = HeaderFooter {
         text: ["안녕".into(), String::new(), String::new(), String::new(), String::new(), String::new()],
         ..HeaderFooter::default()
     };
     assert!(add_header_footer(&mut doc, &[0, 1], &hf, true, &cx()).unwrap_err().to_string().contains("U+C548"));
-    let wm = Watermark { text: "机密".into(), ..Watermark::default() };
-    assert!(add_watermark(&mut doc, &[0], &wm, true).unwrap_err().to_string().contains("U+673A"));
+    let wm = Watermark { text: "비밀".into(), ..Watermark::default() };
+    assert!(add_watermark(&mut doc, &[0], &wm, true).unwrap_err().to_string().contains("U+BE44"));
     let after: Vec<Vec<String>> = (0..3).map(|p| streams(&reopen(&doc), p)).collect();
     assert_eq!(before, after, "a refused edit changes nothing");
     // Western European text, including what only WinAnsi (not Latin-1) has, still works.
@@ -3730,8 +3730,8 @@ fn page_text_the_standard_fonts_cant_draw_is_refused() {
     add_content(&mut doc, 0, &Content::Text(text.clone())).unwrap();
     // Retyping existing text is refused the same way, and the whole document is left as it was.
     let saved = write_incremental(&doc, &SaveOptions::default()).unwrap();
-    let retyped = AddedText { text: "Café 中".into(), ..text.clone() };
-    assert!(update_content(&mut doc, 0, 0, &Content::Text(retyped)).unwrap_err().to_string().contains("U+4E2D"));
+    let retyped = AddedText { text: "Café 한".into(), ..text.clone() };
+    assert!(update_content(&mut doc, 0, 0, &Content::Text(retyped)).unwrap_err().to_string().contains("U+D55C"));
     assert_eq!(write_incremental(&doc, &SaveOptions::default()).unwrap(), saved, "a refused update changes nothing");
     // A carriage return is checked where it would be drawn: added text splits on LF only, so
     // CRLF would leave a `?`; headers and watermarks split CRLF into lines, but not a lone CR.
@@ -3748,13 +3748,13 @@ fn page_text_the_standard_fonts_cant_draw_is_refused() {
     let arabic = |text: &str| AddedText { rect: [72.0, 600.0, 300.0, 700.0], text: text.into(), ..AddedText::default() };
     // U+061C is in the Arabic block but is a direction mark that's dropped, not shaped: it never
     // makes text drawable, nor (with the face) undrawable.
-    assert!(add_content(&mut doc, 0, &Content::Text(arabic("\u{061C}中"))).is_err());
+    assert!(add_content(&mut doc, 0, &Content::Text(arabic("\u{061C}한"))).is_err());
     if pdfcraft_fonts::arabic_has('م') {
         add_content(&mut doc, 0, &Content::Text(arabic("مرحبا Hello"))).unwrap();
         add_content(&mut doc, 0, &Content::Text(arabic("\u{061C}Hello"))).unwrap();
-        for text in ["مرحبا 中", "\u{061C}中"] {
+        for text in ["مرحبا 한", "\u{061C}한"] {
             let err = add_content(&mut doc, 0, &Content::Text(arabic(text))).unwrap_err().to_string();
-            assert!(err.contains("U+4E2D"), "{text:?}: {err}");
+            assert!(err.contains("U+D55C"), "{text:?}: {err}");
         }
     } else {
         // #403's own refusal says what's missing; the Add-text editor still keeps the draft.
@@ -4083,7 +4083,7 @@ fn added_thai_text_wraps_clusters_and_survives_reopen() {
     assert_eq!(super::added::lines(&narrow), ["กิ่", "กิ่", "กิ่"]);
     update_content(&mut doc, 0, 0, &Content::Text(AddedText { text: "แก้ไข น้ำ".into(), ..t.clone() })).unwrap();
     assert!(!own(&doc, 0).is_empty());
-    let bad = Content::Text(AddedText { text: "ไทย 日".into(), ..t });
+    let bad = Content::Text(AddedText { text: "ไทย 안".into(), ..t });
     let before = list_added(&doc);
     assert!(update_content(&mut doc, 0, 0, &bad).is_err());
     assert_eq!(list_added(&doc), before);
@@ -4156,6 +4156,36 @@ fn headers_footers_and_watermarks_draw_cyrillic_with_the_bundled_face() {
     let mut fresh = fixture();
     assert!(add_header_footer(&mut fresh, &[0], &bad, false, &cx()).is_err());
     assert!(!fresh.is_modified());
+}
+
+#[test]
+fn added_simplified_chinese_uses_the_chinese_face_and_japanese_keeps_its_own() {
+    let mut doc = fixture();
+    let chinese = AddedText {
+        rect: [20.0, 100.0, 200.0, 300.0], text: "们这说对时发国为学习，欢迎使用".into(), size: 16.0, ..AddedText::default()
+    };
+    if !pdfcraft_fonts::hans_has('们') {
+        eprintln!("skipping the Simplified Chinese checks: built without a craft-fonts Hans face (set CRAFT_FONTS_DIR to an input with one)");
+        assert_eq!(first_undrawable(&chinese), Some('们'));
+        return;
+    }
+    assert_eq!(first_undrawable(&chinese), None);
+    add_content(&mut doc, 0, &Content::Text(chinese)).unwrap();
+    // a Japanese text with the same ideographs keeps the Japanese forms
+    let japanese = AddedText { rect: [20.0, 400.0, 200.0, 500.0], text: "国のテキスト".into(), size: 16.0, ..AddedText::default() };
+    add_content(&mut doc, 0, &Content::Text(japanese)).unwrap();
+    let reopened = reopen(&doc);
+    let p = &pdfcraft_model::pages(&reopened)[0];
+    let res = reopened.resolve(p.dict.get(b"Resources").unwrap());
+    let fonts = reopened.resolve(res.as_dict().unwrap().get(b"Font").unwrap()).as_dict().unwrap().clone();
+    let mut families = Vec::new();
+    for (_, v) in fonts.iter().filter(|(k, _)| k.starts_with(b"PCAr")) {
+        let f = reopened.resolve(v).as_dict().unwrap().clone();
+        let d = reopened.resolve(f.get(b"FontDescriptor").unwrap()).as_dict().unwrap().clone();
+        families.push(String::from_utf8_lossy(d.name(b"FontName").unwrap()).into_owned());
+    }
+    assert!(families.iter().any(|f| f.contains("OmnitextHans") || f.contains("Hans")), "{families:?}");
+    assert!(families.iter().any(|f| f.contains("BIZ")), "{families:?}");
 }
 
 #[test]
