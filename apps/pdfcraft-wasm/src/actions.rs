@@ -132,7 +132,7 @@ impl Document {
         if v["kind"] == "click" {
             let target = target.ok_or("a click needs a field")?;
             if let Some(xfa) = self.doc()?.xfa_click_script(target) {
-                return self.run_xfa_click(&xfa, target);
+                return self.run_xfa_click(&xfa);
             }
             return self.run_javascript("", Some(target));
         }
@@ -157,7 +157,7 @@ impl Document {
 
     /// Does what a static XFA form's click script says, for the calls forms use on a button: reset the data, print,
     /// show a message, open an address. Anything else it does is left out.
-    fn run_xfa_click(&mut self, script: &str, target: &str) -> Result<String, String> {
+    fn run_xfa_click(&mut self, script: &str) -> Result<String, String> {
         let mut alerts = Vec::new();
         let mut requests = Vec::new();
         let mut reset = false;
@@ -174,9 +174,34 @@ impl Document {
             }
         }
         if reset {
-            self.run_javascript("this.resetForm();", Some(target))?;
+            self.clear_form()?;
         }
         Ok(output_json(&alerts, &[], &requests, &[]).to_string())
+    }
+
+    /// Empties every field, as an XFA form's reset does (its data goes back to what the template starts with), not to the
+    /// default values the PDF side of such a form may carry.
+    fn clear_form(&mut self) -> Result<(), String> {
+        use pdfcraft_engine::{FieldValue, FormFieldKind as K};
+        let edits: Vec<Edit> = self
+            .doc()?
+            .form
+            .iter()
+            .filter_map(|f| {
+                let value = match f.kind {
+                    K::Text => FieldValue::Text(String::new()),
+                    K::CheckBox => FieldValue::Check(false),
+                    K::Radio => FieldValue::Radio(None),
+                    K::Combo | K::List => FieldValue::Choice(Vec::new()),
+                    K::PushButton | K::Signature => return None,
+                };
+                Some(Edit::SetFieldValue { name: f.name.clone(), value })
+            })
+            .collect();
+        if edits.is_empty() {
+            return Ok(());
+        }
+        self.apply(Edit::Batch { label: "Reset form".into(), edits })
     }
 
     /// What field scripts printed or asked for during edits since the last call (alerts, requests, errors).
