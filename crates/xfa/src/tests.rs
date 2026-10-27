@@ -1310,6 +1310,7 @@ fn overrides_live_in_the_acroform_and_hide_objects_in_the_layout() {
     let mut ov = Overrides::default();
     ov.presence.insert("form[0].page1[0].details[0]".into(), "visible".into());
     ov.access.insert("form[0].page1[0].qty[0]".into(), "readOnly".into());
+    ov.geometry.insert("form[0].page1[0].qty[0]#w".into(), "3in".into());
     set_overrides(&mut doc, &ov).unwrap();
     assert_eq!(overrides(&doc), ov);
     let (tpl, _) = parse(&scripted_template()).unwrap();
@@ -1319,6 +1320,8 @@ fn overrides_live_in_the_acroform_and_hide_objects_in_the_layout() {
     assert_eq!(details.common.presence, Presence::Visible);
     let Node::Field(qty) = page.children.iter().find(|c| c.common().name.as_deref() == Some("qty")).unwrap() else { panic!() };
     assert_eq!(qty.access, Access::ReadOnly);
+    // a size a script set is the field's own
+    assert_eq!(qty.common.w, Some(216.0));
     // Laying out again shows the note field and keeps the others.
     let report = rerender(&mut doc, &tpl).unwrap();
     let after = names(&doc);

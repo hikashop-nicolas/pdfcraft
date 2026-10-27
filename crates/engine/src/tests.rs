@@ -6188,6 +6188,8 @@ fn xfa_scripts_call_the_script_objects_of_their_subform() {
     assert_eq!(value("loud"), vec!["HEY!".to_string()]);
     // `xfa.layout` tells where the form's objects were laid out
     assert!(value("placed")[0].starts_with("2in on page 1 of "), "{:?}", value("placed"));
+    // a size a script sets is what the layout then uses, and what the next script reads back
+    assert_eq!(value("sees"), vec!["3".to_string()]);
     // a `<variables><text name="Mode">` is an object with a value
     assert_eq!(value("mode"), vec!["on & \"quoted\"".to_string()]);
     let out = s.take_js_output(id);

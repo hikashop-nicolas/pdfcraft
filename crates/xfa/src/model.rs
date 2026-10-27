@@ -375,6 +375,16 @@ impl Node {
             Node::ExclGroup(g) => &g.common,
         }
     }
+
+    pub fn common_mut(&mut self) -> &mut Common {
+        match self {
+            Node::Subform(s) => &mut s.common,
+            Node::Area(a) => &mut a.common,
+            Node::Field(f) => &mut f.common,
+            Node::Draw(d) => &mut d.common,
+            Node::ExclGroup(g) => &mut g.common,
+        }
+    }
 }
 
 pub(crate) struct SomIndices(Vec<usize>);

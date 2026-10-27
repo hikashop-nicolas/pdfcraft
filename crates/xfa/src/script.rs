@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use pdfcraft_cos::{Dict, Document, Object, PdfString};
 
 use crate::data::{DataNode, data_path, parse_datasets};
-use crate::model::{Access, Field, Node, Presence, Script, ScriptObject, SomIndices, Subform, Template};
+use crate::model::{Access, Common, Field, Node, Presence, Script, ScriptObject, SomIndices, Subform, Template};
 use crate::{Report, XfaError};
 
 /// Private key on the AcroForm: presence scripts set, by SOM path.
@@ -84,11 +84,13 @@ pub struct LiveForm {
 pub struct Overrides {
     pub presence: BTreeMap<String, String>,
     pub access: BTreeMap<String, String>,
+    /// Sizes and positions a script set, as it wrote them, by `som#property` (`form[0].head[0]#h`).
+    pub geometry: BTreeMap<String, String>,
 }
 
 impl Overrides {
     pub fn is_empty(&self) -> bool {
-        self.presence.is_empty() && self.access.is_empty()
+        self.presence.is_empty() && self.access.is_empty() && self.geometry.is_empty()
     }
 }
 
@@ -124,7 +126,7 @@ pub fn overrides(doc: &Document) -> Overrides {
     let Some((_, acro)) = acroform(doc) else { return out };
     let Some(o) = acro.get(OVERRIDES_KEY).map(|o| doc.resolve(o)) else { return out };
     let Some(d) = o.as_dict() else { return out };
-    for (which, map) in [(&b"Presence"[..], &mut out.presence), (&b"Access"[..], &mut out.access)] {
+    for (which, map) in [(&b"Presence"[..], &mut out.presence), (&b"Access"[..], &mut out.access), (&b"Geometry"[..], &mut out.geometry)] {
         if let Some(m) = d.get(which).map(|m| doc.resolve(m))
             && let Some(m) = m.as_dict()
         {
@@ -146,7 +148,7 @@ pub fn set_overrides(doc: &mut Document, ov: &Overrides) -> Result<(), XfaError>
         acro.remove(OVERRIDES_KEY);
     } else {
         let mut d = Dict::new();
-        for (which, map) in [("Presence", &ov.presence), ("Access", &ov.access)] {
+        for (which, map) in [("Presence", &ov.presence), ("Access", &ov.access), ("Geometry", &ov.geometry)] {
             if map.is_empty() {
                 continue;
             }
@@ -477,6 +479,24 @@ pub fn has_scripts(tpl: &Template) -> bool {
 
 /// The template with `ov` applied to its objects (instance 0 of each; scripts that hide one
 /// instance of a repeating subform hide them all).
+/// The sizes and positions `ov` holds for the object at `som`, in `c`.
+fn apply_geometry(c: &mut Common, som: &str, ov: &Overrides) {
+    for (prop, slot) in [
+        ("x", &mut c.x),
+        ("y", &mut c.y),
+        ("w", &mut c.w),
+        ("h", &mut c.h),
+        ("minW", &mut c.min_w),
+        ("maxW", &mut c.max_w),
+        ("minH", &mut c.min_h),
+        ("maxH", &mut c.max_h),
+    ] {
+        if let Some(points) = ov.geometry.get(&format!("{som}#{prop}")).and_then(|v| crate::parse::measure(v)) {
+            *slot = Some(points);
+        }
+    }
+}
+
 pub fn apply_overrides(tpl: &Template, ov: &Overrides) -> Template {
     /// Set the presence `ov` gives each of `nodes` (children of `parent_som`) and their descendants,
     /// down to [`MAX_DEPTH`], and the access it gives a field outside an exclusion group. An unnamed
@@ -499,6 +519,9 @@ pub fn apply_overrides(tpl: &Template, ov: &Overrides) -> Template {
             // the overrides under it.
             let presence = name.and_then(|_| ov.presence.get(&som)).map(|p| Presence::parse(Some(p)));
             let access = name.and_then(|_| ov.access.get(&som)).cloned();
+            if name.is_some() && !ov.geometry.is_empty() {
+                apply_geometry(n.common_mut(), &som, ov);
+            }
             match n {
                 Node::Subform(s) => {
                     if let Some(p) = presence {

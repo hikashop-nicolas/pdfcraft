@@ -777,6 +777,12 @@ function twice(x) { return x * 2 + step; }
   <field name="placed" w="2in" h="0.3in"><ui><textEdit/></ui>
    <event activity="initialize"><script contentType="application/x-javascript">this.rawValue = xfa.layout.w(this, "in", 0) + "in on page " + xfa.layout.page(this) + " of " + xfa.layout.pageContent(0, "", false).length;</script></event>
   </field>
+  <field name="resized" w="2in" h="0.3in"><ui><textEdit/></ui>
+   <event activity="initialize"><script contentType="application/x-javascript">this.w = "3in"; this.rawValue = "set";</script></event>
+  </field>
+  <field name="sees" w="2in" h="0.3in"><ui><textEdit/></ui>
+   <event activity="initialize"><script contentType="application/x-javascript">this.rawValue = xfa.layout.w(resized, "in", 0);</script></event>
+  </field>
   <field name="mode" w="2in" h="0.3in"><ui><textEdit/></ui>
    <event activity="initialize"><script contentType="application/x-javascript">this.rawValue = Mode.value;</script></event>
   </field>

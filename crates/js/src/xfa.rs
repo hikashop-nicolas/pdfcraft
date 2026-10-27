@@ -127,6 +127,12 @@ pub enum XfaEffect {
         som: String,
         access: String,
     },
+    /// A size or position of an object (`h`, `w`, `x`, `y`, `minH`, `maxH`, `minW`, `maxW`) as the script wrote it (`"2in"`).
+    SetGeometry {
+        som: String,
+        prop: String,
+        value: String,
+    },
     /// A new instance of a repeating subform, named by its own SOM (`…row[3]`).
     AddInstance {
         som: String,
@@ -231,6 +237,7 @@ fn effect_key(e: &XfaEffect) -> Option<(u8, String)> {
         XfaEffect::SetValue { som, .. } => Some((0, som.clone())),
         XfaEffect::SetPresence { som, .. } => Some((1, som.clone())),
         XfaEffect::SetAccess { som, .. } => Some((2, som.clone())),
+        XfaEffect::SetGeometry { som, prop, .. } => Some((3, format!("{som}#{prop}"))),
         _ => None,
     }
 }
@@ -241,6 +248,7 @@ fn payload(e: &XfaEffect) -> usize {
         XfaEffect::SetValue { som, value: s } | XfaEffect::SetPresence { som, presence: s } | XfaEffect::SetAccess { som, access: s } => {
             som.len().saturating_add(s.len())
         }
+        XfaEffect::SetGeometry { som, prop, value } => som.len().saturating_add(prop.len()).saturating_add(value.len()),
         XfaEffect::AddInstance { som } | XfaEffect::RemoveInstance { som } => som.len(),
         XfaEffect::MessageBox(s) | XfaEffect::LaunchUrl(s) | XfaEffect::SetFocus(s) => s.len(),
         XfaEffect::ResetData(names) => names.iter().fold(0usize, |n, s| n.saturating_add(s.len()).saturating_add(std::mem::size_of::<String>())),
@@ -1227,9 +1235,21 @@ fn node_set(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
             };
             h.set_state(idx, XfaEffect::SetAccess { som, access: a });
         }
+        // a size or position the layout then takes
+        "x" | "y" | "w" | "h" | "minH" | "maxH" | "minW" | "maxW" if is_measurement(&value) => {
+            h.set_state(idx, XfaEffect::SetGeometry { som, prop: key.clone(), value: value.trim().to_string() });
+        }
         _ => {}
     }
     Ok(JsValue::from(true))
+}
+
+/// Whether `v` reads as a measurement (`2in`, `12.5mm`, `-3pt`, `10`): a number and, perhaps, a unit.
+fn is_measurement(v: &str) -> bool {
+    let v = v.trim();
+    let split = v.find(|c: char| c.is_ascii_alphabetic() || c == '%').unwrap_or(v.len());
+    let (num, unit) = v.split_at(split);
+    num.trim().parse::<f64>().is_ok_and(f64::is_finite) && matches!(unit.trim(), "" | "pt" | "mm" | "cm" | "in" | "mp")
 }
 
 fn node_to_string(this: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {

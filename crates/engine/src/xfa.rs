@@ -665,6 +665,14 @@ impl<'a, 'b> Runner<'a, 'b> {
                         relayout = true;
                     }
                 }
+                XfaEffect::SetGeometry { som, prop, value } => {
+                    if self.ov.geometry.insert(format!("{som}#{prop}"), value.clone()).as_ref() != Some(value) {
+                        self.ov_dirty = true;
+                        self.changes.visibility += 1;
+                        self.invalidate();
+                        relayout = true;
+                    }
+                }
                 XfaEffect::SetAccess { som, access } => {
                     if self.ov.access.insert(som.clone(), access.clone()).as_ref() != Some(access) {
                         self.ov_dirty = true;
