@@ -15,8 +15,8 @@ use base64::Engine;
 use crate::XfaError;
 use crate::data::{DataNode, data_date_letters, data_path, data_to_iso, date_letters, is_on, iso_to_pattern};
 use crate::model::{
-    Access, Area, Border, Common, Draw, ExclGroup, Field, Font, HAlign, Layout, Margin, Node, Occur, PageArea, PageRole, Para, Placement, Presence,
-    Rect, Script, SomIndices, Stroke, Subform, Template, Ui, VAlign, Value,
+    Access, ArcSpec, Area, Border, Common, Draw, ExclGroup, Field, Font, HAlign, Layout, Margin, Node, Occur, PageArea, PageRole, Para, Placement,
+    Presence, Rect, Script, SomIndices, Stroke, Subform, Template, Ui, VAlign, Value,
 };
 use crate::text::{self, Block, Face, Span};
 
@@ -61,6 +61,8 @@ pub enum Item {
     /// A box with rounded (or inverted) corners: its fill, and its edge drawn inside it.
     Rounded(Box<Rounded>),
     Text(Span),
+    /// A polyline (or polygon when closed), filled and edged: an arc.
+    Path(Box<Path>),
     Image {
         rect: Rect,
         data: Arc<Vec<u8>>,
@@ -177,6 +179,17 @@ pub struct Page {
     pub items: Vec<Item>,
     /// Where each object of the form was laid out on this page, for `xfa.layout` in a script.
     pub boxes: Vec<LayoutBox>,
+}
+
+/// An arc ([`Item::Path`]): the points along it, top-left based, as the page's own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Path {
+    pub points: Vec<(f64, f64)>,
+    /// A full ellipse (otherwise the fill is closed by the chord and the edge stays open).
+    pub closed: bool,
+    pub fill: Option<[f64; 3]>,
+    /// Width, colour and dashing.
+    pub edge: Option<(f64, [f64; 3], bool)>,
 }
 
 /// An object of the form on a page: its SOM path, its class (`subform`, `field`, `pageArea`…) and where it is.
@@ -427,7 +440,7 @@ fn solid_extent(item: &Item) -> Option<(f64, f64)> {
         Item::Text(s) => Some((s.baseline - s.face.size * 0.8, s.baseline + s.face.size * 0.2)),
         Item::Image { rect, .. } => Some((rect.y, rect.bottom())),
         Item::Widget(w) => Some((w.rect.y, w.rect.bottom())),
-        Item::Fill { .. } | Item::Line { .. } | Item::Rounded(_) => None,
+        Item::Fill { .. } | Item::Line { .. } | Item::Rounded(_) | Item::Path(_) => None,
     }
 }
 
@@ -497,6 +510,11 @@ fn moved(mut item: Item, dx: f64, dy: f64) -> Item {
         Item::Line { from, to, .. } => {
             *from = (from.0 + dx, from.1 + dy);
             *to = (to.0 + dx, to.1 + dy);
+        }
+        Item::Path(p) => {
+            for q in &mut p.points {
+                *q = (q.0 + dx, q.1 + dy);
+            }
         }
         Item::Text(s) => {
             s.x += dx;
@@ -1342,7 +1360,7 @@ impl Layouter<'_> {
             Value::Text(t) => text::measure_height(&text::plain(t), w, &ctx.para, &Face::of(&ctx.font), &|id, max| self.embed(id, max)),
             Value::Rich(r) => text::measure_height(r, w, &ctx.para, &Face::of(&ctx.font), &|id, max| self.embed(id, max)),
             Value::Image { data, .. } => crate::image::size(data).map_or(w, |(iw, ih)| if iw > 0 { w * ih as f64 / iw as f64 } else { w }),
-            Value::Line { .. } | Value::Rectangle(_) | Value::Empty => 0.0,
+            Value::Line { .. } | Value::Rectangle(_) | Value::Arc(_) | Value::Empty => 0.0,
         }
     }
 
@@ -1784,6 +1802,30 @@ impl Layouter<'_> {
         self.push_block(block)
     }
 
+    /// An arc as the points along it: the ellipse in `rect`, `start` degrees counterclockwise from three o'clock, `sweep` more.
+    fn draw_arc(&mut self, a: &ArcSpec, rect: Rect) -> Result<(), XfaError> {
+        if rect.w <= 0.0 || rect.h <= 0.0 {
+            return Ok(());
+        }
+        let sweep = a.sweep.clamp(-360.0, 360.0);
+        let closed = sweep.abs() >= 360.0 - 1e-9;
+        let (cx, cy, rx, ry) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0, rect.w / 2.0, rect.h / 2.0);
+        let steps = ((sweep.abs() / 5.0).ceil() as usize).clamp(2, 72);
+        let direction = if a.clockwise { -1.0 } else { 1.0 };
+        let points: Vec<(f64, f64)> = (0..=steps)
+            .map(|i| {
+                let theta = (a.start + direction * sweep * i as f64 / steps as f64).to_radians();
+                (cx + rx * theta.cos(), cy - ry * theta.sin())
+            })
+            .collect();
+        let edge = a.edge.visible().then_some((a.edge.thickness.clamp(0.1, 20.0), a.edge.color.0, a.edge.stroke == Stroke::Dashed));
+        let fill = a.fill.map(|c| c.0);
+        if fill.is_none() && edge.is_none() {
+            return Ok(());
+        }
+        self.push(Item::Path(Box::new(Path { points, closed, fill, edge })))
+    }
+
     fn draw_draw(&mut self, d: &Draw, rect: Rect, ctx: &Ctx) -> Result<(), XfaError> {
         if let Some(b) = &d.common.border {
             self.draw_border(b, rect)?;
@@ -1805,6 +1847,7 @@ impl Layouter<'_> {
                 self.push(Item::Line { from, to, width: edge.thickness.clamp(0.1, 20.0), color: edge.color.0, dashed: edge.stroke == Stroke::Dashed })
             }
             Value::Rectangle(b) => self.draw_border(b, inner),
+            Value::Arc(a) => self.draw_arc(a, inner),
             Value::Empty => Ok(()),
         }
     }

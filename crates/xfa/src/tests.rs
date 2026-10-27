@@ -4095,3 +4095,35 @@ fn the_layout_notes_where_each_object_landed() {
     let page_area = live.root.children.iter().find(|c| c.kind == Some(NodeKind::PageArea));
     assert!(page_area.is_none_or(|a| a.children.first().is_some_and(|c| c.kind == Some(NodeKind::ContentArea))));
 }
+
+/// An `<arc>` is drawn along its ellipse: a whole one closed and a part of one open, the fill closed by the chord, going the
+/// way its `hand` says.
+#[test]
+fn arcs_are_drawn_along_their_ellipse() {
+    let xdp = r##"<?xml version="1.0" encoding="UTF-8"?>
+<xdp:xdp xmlns:xdp="http://ns.adobe.com/xdp/">
+<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/">
+<subform name="form" layout="tb">
+ <pageSet><pageArea name="front"><contentArea x="0.5in" y="0.5in" w="7.5in" h="10in"/><medium short="8.5in" long="11in"/></pageArea></pageSet>
+ <draw name="whole" w="1in" h="0.5in"><value><arc><fill><color value="255,0,0"/></fill></arc></value></draw>
+ <draw name="part" w="1in" h="1in"><value><arc hand="left" startAngle="90" sweepAngle="90"><edge thickness="2pt"/></arc></value></draw>
+</subform>
+</template>
+</xdp:xdp>"##;
+    let (tpl, _) = parse(xdp).unwrap();
+    let form = layout(&tpl, None).unwrap();
+    let paths: Vec<&crate::layout::Path> =
+        form.pages[0].items.iter().filter_map(|i| if let Item::Path(p) = i { Some(p.as_ref()) } else { None }).collect();
+    assert_eq!(paths.len(), 2);
+    let (whole, part) = (paths[0], paths[1]);
+    assert!(whole.closed && whole.fill == Some([1.0, 0.0, 0.0]));
+    // the whole ellipse starts at three o'clock and spans the box
+    let (first, last) = (whole.points[0], whole.points[whole.points.len() - 1]);
+    assert!((first.0 - last.0).abs() < 1e-6 && (first.1 - last.1).abs() < 1e-6);
+    let xs = whole.points.iter().map(|p| p.0);
+    assert!((xs.clone().fold(f64::MIN, f64::max) - xs.fold(f64::MAX, f64::min) - 72.0).abs() < 0.1);
+    // a quarter from twelve o'clock, clockwise: it ends at three o'clock, to the right of where it started
+    assert!(!part.closed && part.fill.is_none() && part.edge.is_some_and(|(w, _, _)| (w - 2.0).abs() < 1e-9));
+    let (a, b) = (part.points[0], part.points[part.points.len() - 1]);
+    assert!(b.0 > a.0 && b.1 > a.1, "{a:?} {b:?}");
+}

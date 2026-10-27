@@ -135,6 +135,28 @@ fn all_faces() -> Vec<(&'static str, &'static str)> {
 
 /// The content that draws rounded box `r` on a page `page_h` tall: its fill along its curves,
 /// then its edge inside it. A side a page break cut has no edge.
+/// An arc: its polyline, filled (closed by the chord) and edged (closed only for a whole ellipse).
+fn path(p: &crate::layout::Path, page_h: f64) -> String {
+    let mut route = String::new();
+    for (i, q) in p.points.iter().enumerate() {
+        route.push_str(&format!("{} {} {} ", n(q.0), n(page_h - q.1), if i == 0 { "m" } else { "l" }));
+    }
+    let mut c = String::new();
+    if let Some(color) = p.fill {
+        c.push_str(&format!("{} rg {route}h f\n", rgb(color)));
+    }
+    if let Some((w, color, dashed)) = p.edge {
+        c.push_str(&format!(
+            "q {} RG {} w {}{route}{}S Q\n",
+            rgb(color),
+            n(w),
+            if dashed { "[2 2] 0 d " } else { "" },
+            if p.closed { "h " } else { "" }
+        ));
+    }
+    c
+}
+
 pub(crate) fn rounded(r: &Rounded, page_h: f64) -> String {
     let mut c = String::new();
     if let Some(color) = r.fill {
@@ -798,6 +820,7 @@ impl Emitter<'_> {
                     content.extend(format!("{} rg {} {} {} {} re f\n", rgb(*color), n(rect.x), n(h - rect.bottom()), n(rect.w), n(rect.h)).bytes());
                 }
                 Item::Rounded(r) => content.extend(rounded(r, h).bytes()),
+                Item::Path(p) => content.extend(path(p, h).bytes()),
                 Item::Line { from, to, width, color, dashed } => {
                     content.extend(
                         format!(

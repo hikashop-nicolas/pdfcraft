@@ -6,9 +6,9 @@ use roxmltree::Node as XmlNode;
 
 use crate::XfaError;
 use crate::model::{
-    Access, Anchor, Area, Border, Caption, ChoiceList, Color, Common, Corner, Draw, Edge, ExclGroup, Field, FontSpec, HAlign, Layout, Margin, Node,
-    Occur, PageArea, PageRole, PageSet, ParaSpec, Paragraph, Placement, Presence, Rect, RichText, Run, Script, ScriptObject, Stroke, Subform,
-    Template, Ui, VAlign, Value,
+    Access, Anchor, ArcSpec, Area, Border, Caption, ChoiceList, Color, Common, Corner, Draw, Edge, ExclGroup, Field, FontSpec, HAlign, Layout,
+    Margin, Node, Occur, PageArea, PageRole, PageSet, ParaSpec, Paragraph, Placement, Presence, Rect, RichText, Run, Script, ScriptObject, Stroke,
+    Subform, Template, Ui, VAlign, Value,
 };
 
 /// Deepest element nesting followed (templates are shallow; hostile ones are not).
@@ -405,6 +405,18 @@ fn parse_value(n: Option<XmlNode>, warnings: &mut Vec<String>) -> Value {
             }
             "line" => {
                 return Value::Line { slope_up: c.attribute("slope") == Some("/"), edge: child(c, "edge").map(parse_edge).unwrap_or_default() };
+            }
+            "arc" => {
+                let angle = |name: &str, default: f64| {
+                    c.attribute(name).and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(default)
+                };
+                return Value::Arc(Box::new(ArcSpec {
+                    start: angle("startAngle", 0.0),
+                    sweep: angle("sweepAngle", 360.0),
+                    clockwise: c.attribute("hand") == Some("left"),
+                    edge: child(c, "edge").map(parse_edge).unwrap_or_default(),
+                    fill: parse_fill(child(c, "fill")),
+                }));
             }
             "rectangle" => {
                 let mut b = parse_border(Some(c)).unwrap_or_default();

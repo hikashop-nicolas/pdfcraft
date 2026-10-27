@@ -634,6 +634,20 @@ pub enum Value {
         edge: Edge,
     },
     Rectangle(Box<Border>),
+    /// An elliptical arc in the box.
+    Arc(Box<ArcSpec>),
+}
+
+/// `<arc>`: a piece of the ellipse in the box, from `start` degrees (counterclockwise from three o'clock) through `sweep`
+/// degrees, filled and edged.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArcSpec {
+    pub start: f64,
+    pub sweep: f64,
+    /// `hand="left"`: the arc runs clockwise.
+    pub clockwise: bool,
+    pub edge: Edge,
+    pub fill: Option<Color>,
 }
 
 impl Value {
