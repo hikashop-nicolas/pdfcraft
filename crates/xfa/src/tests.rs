@@ -4073,3 +4073,22 @@ fn clear_password_values_clears_static_xfa_password_fields() {
     let packets = read_packets(&doc).unwrap().unwrap();
     assert!(!packets.xdp.contains("hunter2"), "{}", packets.xdp);
 }
+
+/// Where each object of the form lands is noted for the scripts that ask (`xfa.layout`): the page area and its content
+/// areas first, then every named object with the box it was drawn in, an unnamed field as `field[n]`.
+#[test]
+fn the_layout_notes_where_each_object_landed() {
+    let (tpl, _) = parse(&crate::fixtures::script_objects_template()).expect("parses");
+    let form = layout(&tpl, None).unwrap();
+    let boxes = &form.pages[0].boxes;
+    let class_of = |som: &str| boxes.iter().find(|b| b.som == som).map(|b| b.class);
+    assert_eq!(class_of("front[0]"), Some("pageArea"));
+    assert_eq!(class_of("front[0].contentArea[0]"), Some("contentArea"));
+    let total = boxes.iter().find(|b| b.som == "form[0].page[0].total[0]").expect("the field is placed");
+    assert_eq!((total.class, total.rect.w), ("field", 144.0));
+    assert!((total.rect.h - 21.6).abs() < 1e-9);
+    // the live form calls the same objects by the same paths
+    let live = form_tree(&tpl, None, &Overrides::default());
+    let page_area = live.root.children.iter().find(|c| c.kind == Some(NodeKind::PageArea));
+    assert!(page_area.is_none_or(|a| a.children.first().is_some_and(|c| c.kind == Some(NodeKind::ContentArea))));
+}

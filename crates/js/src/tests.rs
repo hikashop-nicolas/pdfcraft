@@ -1414,6 +1414,7 @@ mod session {
         Script {
             prelude: String::new(),
             texts: Vec::new(),
+            layout: Default::default(),
             source: source.into(),
             formcalc,
             event: XfaEvent { activity: activity.into(), target: target.into(), ..Default::default() },
@@ -1521,6 +1522,31 @@ mod session {
         assert_eq!((o.error, o.result.as_deref()), (None, Some("3")));
         let o = run(&mut s, "xfa.datasets.createNode('dataGroup', 'LOVFile').loadXML('<a/>', 0, 1); qty.clearItems(); 5");
         assert_eq!((o.error, o.result.as_deref()), (None, Some("5")));
+    }
+
+    /// The layout of the form is what a script reads from `xfa.layout`, in the unit it asks for, and the class selectors of a
+    /// SOM expression (`#subform`) find an object whatever its name.
+    #[test]
+    fn a_script_reads_where_objects_were_laid_out_and_selects_by_class() {
+        let mut s = XfaSession::new(XfaDoc { page_count: 2, ..Default::default() });
+        let mut sc = script(
+            "xfa.layout.x(qty, 'in', 0) + ':' + xfa.layout.w(qty, 'pt') + ':' + xfa.layout.page(qty) + ':' + qty.h + ':' + xfa.layout.pageContent(1, '', false).length + ':' + xfa.form.resolveNode('#subform.page1.qty').name",
+            false,
+            "form1[0].page1[0].total[0]",
+            "calculate",
+        );
+        sc.layout = std::sync::Arc::new(vec![crate::xfa::XfaBox {
+            som: "form1[0].page1[0].qty[0]".into(),
+            class: "field".into(),
+            page: 1,
+            x: 72.0,
+            y: 144.0,
+            w: 36.0,
+            h: 18.0,
+            master: false,
+        }]);
+        let o = s.run(sc);
+        assert_eq!(o.result.as_deref(), Some("1:36:2:0.25in:1:qty"), "{o:?}");
     }
 
     /// A JavaScript or FormCalc script whose engine takes longer to be ready than the script's

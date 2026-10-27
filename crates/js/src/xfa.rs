@@ -27,6 +27,10 @@ pub enum XfaKind {
     ExclGroup,
     Draw,
     Area,
+    /// A page area (master page) of the template.
+    PageArea,
+    /// One of a page area's content areas.
+    ContentArea,
 }
 
 impl XfaKind {
@@ -38,6 +42,8 @@ impl XfaKind {
             XfaKind::ExclGroup => "exclGroup",
             XfaKind::Draw => "draw",
             XfaKind::Area => "area",
+            XfaKind::PageArea => "pageArea",
+            XfaKind::ContentArea => "contentArea",
         }
     }
 }
@@ -78,6 +84,23 @@ pub struct XfaEvent {
     pub target: String,
     pub new_text: String,
     pub prev_text: String,
+}
+
+/// Where an object of the form was laid out: what `xfa.layout` tells a script.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct XfaBox {
+    pub som: String,
+    /// `subform`, `field`, `pageArea`, `contentArea`…
+    pub class: String,
+    /// The page, 0-based.
+    pub page: usize,
+    /// In points from the page's top left.
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    /// Part of the page area's own content, not of the flow.
+    pub master: bool,
 }
 
 /// About the document.
@@ -266,6 +289,8 @@ pub(crate) struct XHost {
     /// A fingerprint of the form's structure (its objects and their paths, not their values): what a script engine kept
     /// across scripts is good for as long as it is the same.
     pub(crate) shape: u64,
+    /// Where the form's objects were laid out, for `xfa.layout`.
+    pub(crate) boxes: std::sync::Arc<Vec<XfaBox>>,
     pub(crate) effects: Vec<XfaEffect>,
     pub(crate) console: Vec<String>,
     pub(crate) doc: XfaDoc,
@@ -310,6 +335,7 @@ impl XHost {
             nodes,
             texts: Vec::new(),
             shape,
+            boxes: Default::default(),
             effects: Vec::new(),
             console: Vec::new(),
             doc: doc.clone(),
@@ -605,18 +631,35 @@ fn value_js(h: &HNode) -> JsValue {
     s(&h.value)
 }
 
+/// The live children of `parent`, an unnamed container's children (and its own, which a script can reach by its
+/// `#subform` name) counted as `parent`'s: a name does not stop at it.
+pub(crate) fn visible_children(h: &XHost, parent: usize) -> Vec<usize> {
+    fn walk(h: &XHost, parent: usize, out: &mut Vec<usize>, depth: usize) {
+        let Some(p) = h.nodes.get(parent) else { return };
+        for &c in &p.children {
+            let Some(n) = h.nodes.get(c) else { continue };
+            if n.gone {
+                continue;
+            }
+            out.push(c);
+            if n.name.starts_with('#') && depth < MAX_DEPTH {
+                walk(h, c, out, depth + 1);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(h, parent, &mut out, 0);
+    out
+}
+
 /// `(idx, name)` of the child of `parent` named `name`, first instance.
 pub(crate) fn child_named(h: &XHost, parent: usize, name: &str) -> Option<usize> {
-    let p = h.nodes.get(parent)?;
-    p.children.iter().copied().find(|&c| h.nodes.get(c).is_some_and(|n| !n.gone && n.name == name))
+    visible_children(h, parent).into_iter().find(|&c| h.nodes.get(c).is_some_and(|n| n.name == name))
 }
 
 /// Every live instance named `name` under `parent`, in order.
 pub(crate) fn instances(h: &XHost, parent: usize, name: &str) -> Vec<usize> {
-    h.nodes
-        .get(parent)
-        .map(|p| p.children.iter().copied().filter(|&c| h.nodes.get(c).is_some_and(|n| !n.gone && n.name == name)).collect())
-        .unwrap_or_default()
+    visible_children(h, parent).into_iter().filter(|&c| h.nodes.get(c).is_some_and(|n| n.name == name)).collect()
 }
 
 fn list_object(ctx: &mut Context, items: &[usize]) -> JsResult<JsValue> {
@@ -946,7 +989,13 @@ pub(crate) fn resolve_som(h: &XHost, from: usize, expr: &str) -> Vec<usize> {
                     }
                 }
                 _ => {
-                    let mut found: Vec<usize> = if descend { descendants_named(h, c, name, 0) } else { instances(h, c, name) };
+                    // `#subform`: the children of that class, whatever their names
+                    let class = name.strip_prefix('#').filter(|k| !k.is_empty());
+                    let mut found: Vec<usize> = match class {
+                        Some(k) => visible_children(h, c).into_iter().filter(|&i| h.nodes.get(i).is_some_and(|n| n.kind.class_name() == k)).collect(),
+                        None if descend => descendants_named(h, c, name, 0),
+                        None => instances(h, c, name),
+                    };
                     // A relative name a node has no child for is looked for among its siblings
                     // and in each enclosing container, nearest first (so a field's script can
                     // say `resolveNode("otherField")`).
@@ -963,6 +1012,10 @@ pub(crate) fn resolve_som(h: &XHost, from: usize, expr: &str) -> Vec<usize> {
                             at = h.nodes.get(p).and_then(|n| n.parent);
                             guard += 1;
                         }
+                    }
+                    // `xfa.form` also reaches what its root subform holds (`xfa.form.resolveNode("FirstPage")`)
+                    if found.is_empty() && depth == 1 && !descend && class.is_none() && h.nodes.get(c).is_some_and(|n| n.kind == XfaKind::Form) {
+                        found = h.nodes.get(c).and_then(|n| n.children.first().copied()).map(|r| instances(h, r, name)).unwrap_or_default();
                     }
                     match index.as_deref() {
                         Some("*") => next.extend(found),
@@ -1027,6 +1080,17 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
     let (name, som, kind, value, presence, access, index, parent, children) = snapshot;
     Ok(match key.as_str() {
         IDX => JsValue::from(idx as f64),
+        // where the object was laid out, as a measurement
+        "x" | "y" | "w" | "h" if node_box(ctx, &som).is_some() => {
+            let b = node_box(ctx, &som).unwrap_or_default();
+            let points = match key.as_str() {
+                "x" => b.x,
+                "y" => b.y,
+                "w" => b.w,
+                _ => b.h,
+            };
+            s(&format!("{}in", (points / 72.0 * 10_000.0).round() / 10_000.0))
+        }
         // On a draw `value` is the <value> element (`Rectangle3.value.rectangle.fill…`), not the text
         "value" if kind == XfaKind::Draw => sink(ctx)?,
         "rawValue" | "value" => host(ctx)?.borrow().nodes.get(idx).map_or(JsValue::null(), value_js),
@@ -1318,20 +1382,92 @@ fn response(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::null())
 }
 
-fn layout_page(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
-    Ok(JsValue::from(host(ctx)?.borrow().doc.page as f64 + 1.0))
-}
-
 fn layout_page0(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::from(host(ctx)?.borrow().doc.page as f64))
 }
 
-fn layout_page_count(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
-    Ok(JsValue::from(host(ctx)?.borrow().doc.page_count as f64))
+/// The first box laid out for the object at `som`.
+fn node_box(ctx: &Context, som: &str) -> Option<XfaBox> {
+    host(ctx).ok()?.borrow().boxes.iter().find(|b| b.som == som).cloned()
 }
 
-fn zero(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
-    Ok(JsValue::from(0.0))
+/// The first box laid out for the object `args[0]` stands for, or the `index`-th one when it was split over several.
+fn box_of(args: &[JsValue], index_at: usize, ctx: &mut Context) -> JsResult<Option<XfaBox>> {
+    let Ok(idx) = node_index(&arg(args, 0), ctx) else { return Ok(None) };
+    let index = if args.len() > index_at { arg(args, index_at).to_number(ctx).unwrap_or(0.0).max(0.0) as usize } else { 0 };
+    let h = host(ctx)?.borrow();
+    let Some(som) = h.nodes.get(idx).map(|n| n.som.clone()) else { return Ok(None) };
+    let mut found = h.boxes.iter().filter(|b| b.som == som);
+    Ok(found.nth(index).or_else(|| h.boxes.iter().find(|b| b.som == som)).cloned())
+}
+
+/// Points as the unit a script asked for (`in` by default).
+fn in_unit(points: f64, unit: &str) -> f64 {
+    match unit.trim() {
+        "pt" => points,
+        "cm" => points / 72.0 * 2.54,
+        "mm" => points / 72.0 * 25.4,
+        "mp" => points * 1000.0,
+        _ => points / 72.0,
+    }
+}
+
+fn layout_measure(args: &[JsValue], ctx: &mut Context, pick: fn(&XfaBox) -> f64) -> JsResult<JsValue> {
+    let unit = if args.len() > 1 { text(&arg(args, 1), ctx)? } else { String::new() };
+    Ok(JsValue::from(box_of(args, 2, ctx)?.map_or(0.0, |b| in_unit(pick(&b), &unit))))
+}
+
+fn layout_x(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    layout_measure(args, ctx, |b| b.x)
+}
+
+fn layout_y(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    layout_measure(args, ctx, |b| b.y)
+}
+
+fn layout_w(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    layout_measure(args, ctx, |b| b.w)
+}
+
+fn layout_h(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    layout_measure(args, ctx, |b| b.h)
+}
+
+/// `layout.page(node)`: the page (1-based) the object starts on.
+fn layout_page_of(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    // an object not laid out (or no layout at all): the page the script runs for
+    let placed = if args.is_empty() { None } else { box_of(args, 1, ctx)? };
+    Ok(JsValue::from(placed.map_or(host(ctx)?.borrow().doc.page as f64 + 1.0, |b| b.page as f64 + 1.0)))
+}
+
+/// `layout.pageSpan(node, index)`: how many pages the object covers.
+fn layout_page_span(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let Ok(idx) = node_index(&arg(args, 0), ctx) else { return Ok(JsValue::from(0.0)) };
+    let h = host(ctx)?.borrow();
+    let Some(som) = h.nodes.get(idx).map(|n| n.som.as_str()) else { return Ok(JsValue::from(0.0)) };
+    let pages: std::collections::HashSet<usize> = h.boxes.iter().filter(|b| b.som == som).map(|b| b.page).collect();
+    Ok(JsValue::from(pages.len() as f64))
+}
+
+/// `layout.pageContent(page, class, relevant)`: the objects laid out on a page (0-based), the content areas first; with
+/// `relevant` the page area and its own content, without it the flow.
+fn layout_page_content(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let page = arg(args, 0).to_number(ctx).unwrap_or(0.0).max(0.0) as usize;
+    let class = if args.len() > 1 { text(&arg(args, 1), ctx)? } else { String::new() };
+    let relevant = arg(args, 2).to_boolean();
+    let found: Vec<usize> = {
+        let h = host(ctx)?.borrow();
+        let on_page = h.boxes.iter().filter(|b| b.page == page && (class.is_empty() || b.class == class));
+        let (areas, rest): (Vec<&XfaBox>, Vec<&XfaBox>) = on_page
+            .filter(|b| if relevant { b.master } else { !b.master || b.class == "contentArea" })
+            .partition(|b| b.class == "contentArea" || b.class == "pageArea");
+        areas.into_iter().chain(rest).filter_map(|b| h.nodes.iter().position(|n| n.som == b.som && !n.gone)).collect()
+    };
+    list_object(ctx, &found)
+}
+
+fn layout_page_count(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::from(host(ctx)?.borrow().doc.page_count as f64))
 }
 
 /// Whether `expr` names a part of the template (its caption, font, border…) below a node the form does have.
@@ -1389,18 +1525,18 @@ fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current: usize, co
         .property(js_string!("title"), s(&doc.file_name), rw)
         .build();
     let layout = ObjectInitializer::new(ctx)
-        .function(NativeFunction::from_fn_ptr(layout_page), js_string!("page"), 1)
+        .function(NativeFunction::from_fn_ptr(layout_page_of), js_string!("page"), 1)
         .function(NativeFunction::from_fn_ptr(layout_page0), js_string!("absPage"), 1)
         .function(NativeFunction::from_fn_ptr(layout_page_count), js_string!("pageCount"), 0)
         .function(NativeFunction::from_fn_ptr(layout_page_count), js_string!("absPageCount"), 0)
         .function(NativeFunction::from_fn_ptr(relayout), js_string!("relayout"), 0)
         .function(NativeFunction::from_fn_ptr(relayout), js_string!("relayoutPageArea"), 0)
-        .function(NativeFunction::from_fn_ptr(zero), js_string!("h"), 2)
-        .function(NativeFunction::from_fn_ptr(zero), js_string!("w"), 2)
-        .function(NativeFunction::from_fn_ptr(zero), js_string!("x"), 2)
-        .function(NativeFunction::from_fn_ptr(zero), js_string!("y"), 2)
-        .function(NativeFunction::from_fn_ptr(zero), js_string!("pageSpan"), 1)
-        .function(NativeFunction::from_fn_ptr(empty_list), js_string!("pageContent"), 3)
+        .function(NativeFunction::from_fn_ptr(layout_h), js_string!("h"), 3)
+        .function(NativeFunction::from_fn_ptr(layout_w), js_string!("w"), 3)
+        .function(NativeFunction::from_fn_ptr(layout_x), js_string!("x"), 3)
+        .function(NativeFunction::from_fn_ptr(layout_y), js_string!("y"), 3)
+        .function(NativeFunction::from_fn_ptr(layout_page_span), js_string!("pageSpan"), 2)
+        .function(NativeFunction::from_fn_ptr(layout_page_content), js_string!("pageContent"), 3)
         .function(NativeFunction::from_fn_ptr(empty_list), js_string!("pageArea"), 1)
         .property(js_string!("ready"), JsValue::from(true), Attribute::READONLY)
         .build();
@@ -1593,10 +1729,7 @@ fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current: usize, co
     for scope in scopes {
         let kids: Vec<(usize, String, bool)> = {
             let h = host(ctx)?.borrow();
-            h.nodes
-                .get(scope)
-                .map(|n| n.children.iter().filter_map(|&c| h.nodes.get(c).map(|k| (c, k.name.clone(), k.repeatable && !k.gone))).collect())
-                .unwrap_or_default()
+            visible_children(&h, scope).into_iter().filter_map(|c| h.nodes.get(c).map(|k| (c, k.name.clone(), k.repeatable && !k.gone))).collect()
         };
         for (c, name, repeatable) in kids {
             if !is_identifier(&name) || defined.contains(&name) {
@@ -1786,7 +1919,7 @@ pub(crate) fn warm_up() {
 
 /// `started` is called once the engine is ready: a time limit on the script runs from then.
 pub(crate) fn run_here(script: &str, event: &XfaEvent, doc: &XfaDoc, root: XfaNode, limits: Limits, started: &dyn Fn()) -> XfaOutcome {
-    run_here_with(script, ScriptCode { prelude: "", texts: Vec::new(), shared: false }, event, doc, root, limits, started)
+    run_here_with(script, ScriptCode { prelude: "", texts: Vec::new(), layout: Default::default(), shared: false }, event, doc, root, limits, started)
 }
 
 /// [`run_here`] with `prelude`, the form's script objects, defined first. They are part of the form, so they are not held
@@ -1800,10 +1933,11 @@ pub(crate) fn run_here_with(
     limits: Limits,
     started: &dyn Fn(),
 ) -> XfaOutcome {
-    let ScriptCode { prelude, texts, shared } = objects;
+    let ScriptCode { prelude, texts, layout, shared } = objects;
     warm_up();
     let mut host_state = XHost::new(root, &event.target, doc);
     host_state.texts = texts;
+    host_state.boxes = layout;
     let current = host_state.current;
     // The engine a session's earlier script left is used again while the form has the same structure: the script objects
     // it defined (read once, with the state they hold) are there for this script.
@@ -1897,6 +2031,8 @@ pub(crate) struct ScriptCode<'a> {
     pub(crate) prelude: &'a str,
     /// The text of the ones that are data, by name.
     pub(crate) texts: Vec<(String, String)>,
+    /// Where the form's objects were laid out.
+    pub(crate) layout: std::sync::Arc<Vec<XfaBox>>,
     /// Whether the engine is the session's, kept for the scripts after this one.
     pub(crate) shared: bool,
 }

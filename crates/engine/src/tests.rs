@@ -6186,6 +6186,8 @@ fn xfa_scripts_call_the_script_objects_of_their_subform() {
     assert_eq!(value("label"), vec!["Hello Ada 7".to_string()]);
     // an object named like a host global (util) replaces it; one that is an XML literal (E4X) is left out and fails only its user
     assert_eq!(value("loud"), vec!["HEY!".to_string()]);
+    // `xfa.layout` tells where the form's objects were laid out
+    assert!(value("placed")[0].starts_with("2in on page 1 of "), "{:?}", value("placed"));
     // a `<variables><text name="Mode">` is an object with a value
     assert_eq!(value("mode"), vec!["on & \"quoted\"".to_string()]);
     let out = s.take_js_output(id);

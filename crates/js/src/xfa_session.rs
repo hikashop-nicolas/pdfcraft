@@ -42,6 +42,8 @@ pub struct Script {
     pub prelude: String,
     /// The text of the script objects that are data (`__xfa_text(name)` in the prelude reads it), by name.
     pub texts: Vec<(String, String)>,
+    /// Where the form's objects were laid out (`xfa.layout`); empty when it was not asked for.
+    pub layout: std::sync::Arc<Vec<crate::xfa::XfaBox>>,
     pub source: String,
     pub formcalc: bool,
     pub event: XfaEvent,
@@ -77,7 +79,7 @@ fn run_script(s: Script, doc: &XfaDoc, started: &dyn Fn()) -> XfaOutcome {
         started();
         return XfaOutcome { error: Some(format!("the form's script objects are too large ({} KiB)", s.prelude.len() / 1024)), ..Default::default() };
     }
-    let code = crate::xfa::ScriptCode { prelude: &s.prelude, texts: s.texts, shared: true };
+    let code = crate::xfa::ScriptCode { prelude: &s.prelude, texts: s.texts, layout: s.layout, shared: true };
     crate::xfa::run_here_with(&s.source, code, &s.event, doc, s.root, s.limits, started)
 }
 

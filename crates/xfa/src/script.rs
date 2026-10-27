@@ -30,6 +30,10 @@ pub enum NodeKind {
     ExclGroup,
     Draw,
     Area,
+    /// A page area (master page) of the template, which scripts see through `xfa.layout`.
+    PageArea,
+    /// One of a page area's content areas.
+    ContentArea,
 }
 
 /// One object of the live form.
@@ -416,14 +420,26 @@ pub fn form_tree(tpl: &Template, data: Option<&DataNode>, ov: &Overrides) -> Liv
     if let Some(ps) = &tpl.root.page_set {
         for (i, area) in ps.areas.iter().enumerate() {
             let som = area.name.clone().map(|n| format!("{n}[0]")).unwrap_or_else(|| format!("#pageArea[{i}]"));
-            let children = w.children(&area.items, &som, 1);
+            let mut children = w.children(&area.items, &som, 1);
             if children.is_empty() {
                 continue;
             }
+            let content_areas = (0..area.content.len()).map(|n| FormNode {
+                name: "contentArea".into(),
+                som: format!("{som}.contentArea[{n}]"),
+                kind: Some(NodeKind::ContentArea),
+                presence: "visible".into(),
+                access: "open".into(),
+                occur_min: 1,
+                occur_max: Some(1),
+                index: n,
+                ..Default::default()
+            });
+            children.splice(0..0, content_areas);
             root_node.children.push(FormNode {
                 name: area.name.clone().unwrap_or_else(|| "#pageArea".into()),
                 som,
-                kind: Some(NodeKind::Area),
+                kind: Some(NodeKind::PageArea),
                 presence: "visible".into(),
                 access: "open".into(),
                 occur_min: 1,
@@ -694,7 +710,8 @@ pub fn refresh_value(live: &mut FormNode, tpl: &Template, data: Option<&DataNode
         }
         for c in n.children.iter_mut() {
             // No data segment of their own: looked through.
-            let transparent = matches!(c.kind, Some(NodeKind::Area)) || (matches!(c.kind, Some(NodeKind::Subform)) && c.name.starts_with('#'));
+            let transparent = matches!(c.kind, Some(NodeKind::Area | NodeKind::PageArea | NodeKind::ContentArea))
+                || (matches!(c.kind, Some(NodeKind::Subform)) && c.name.starts_with('#'));
             if transparent {
                 walk(c, tpl, data, path, pos, changed, depth + 1)?;
                 continue;

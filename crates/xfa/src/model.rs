@@ -386,7 +386,13 @@ impl SomIndices {
             children
                 .iter()
                 .map(|c| {
-                    c.common().name.as_deref().map_or(0, |name| {
+                    // unnamed fields and draws are counted as `field[n]` and `draw[n]` are for a script
+                    let name = c.common().name.as_deref().or(match c {
+                        Node::Field(_) => Some("\u{0}field"),
+                        Node::Draw(_) => Some("\u{0}draw"),
+                        _ => None,
+                    });
+                    name.map_or(0, |name| {
                         let n = seen.entry(name).or_insert(0);
                         *n += 1;
                         *n - 1

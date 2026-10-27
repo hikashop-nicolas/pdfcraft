@@ -145,6 +145,8 @@ fn to_js(n: &FormNode) -> XfaNode {
             NodeKind::ExclGroup => XfaKind::ExclGroup,
             NodeKind::Draw => XfaKind::Draw,
             NodeKind::Area => XfaKind::Area,
+            NodeKind::PageArea => XfaKind::PageArea,
+            NodeKind::ContentArea => XfaKind::ContentArea,
         }),
         value: n.value.clone(),
         numeric: n.numeric,
@@ -281,6 +283,8 @@ struct Runner<'a, 'b> {
     fields: Option<HashMap<String, FieldInfo>>,
     /// The live form as last built; dropped when a script changed the form.
     cached: Option<LiveForm>,
+    /// See [`Self::layout_boxes`]; dropped with `cached`.
+    boxes: Option<std::sync::Arc<Vec<pdfcraft_js::xfa::XfaBox>>>,
     /// The script engine for this event: one thread for all its scripts, each run in a fresh
     /// context on the form as it is then (`cached`, kept up to date in place for values and
     /// rebuilt when the structure changed).
@@ -314,6 +318,7 @@ impl<'a, 'b> Runner<'a, 'b> {
             by_path: None,
             fields: None,
             cached: None,
+            boxes: None,
             session: None,
             changes: Changes::default(),
         }
@@ -323,6 +328,7 @@ impl<'a, 'b> Runner<'a, 'b> {
     /// script.
     fn invalidate(&mut self) {
         self.cached = None;
+        self.boxes = None;
     }
 
     /// The script engine for this event.
@@ -520,6 +526,37 @@ impl<'a, 'b> Runner<'a, 'b> {
         Ok(())
     }
 
+    /// Where each object of the form lands on its pages as the form is now: laid out here, once, until the form changes.
+    fn layout_boxes(&mut self) -> std::sync::Arc<Vec<pdfcraft_js::xfa::XfaBox>> {
+        if let Some(b) = &self.boxes {
+            return b.clone();
+        }
+        let tpl = pdfcraft_xfa::apply_overrides(self.tpl, &self.ov);
+        let boxes: Vec<pdfcraft_js::xfa::XfaBox> = match pdfcraft_xfa::layout(&tpl, self.data.as_ref()) {
+            Ok(form) => form
+                .pages
+                .iter()
+                .enumerate()
+                .flat_map(|(page, p)| {
+                    p.boxes.iter().map(move |b| pdfcraft_js::xfa::XfaBox {
+                        som: b.som.clone(),
+                        class: b.class.to_string(),
+                        page,
+                        x: b.rect.x,
+                        y: b.rect.y,
+                        w: b.rect.w,
+                        h: b.rect.h,
+                        master: b.master,
+                    })
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        let boxes = std::sync::Arc::new(boxes);
+        self.boxes = Some(boxes.clone());
+        boxes
+    }
+
     /// Lay the form out now if a script owes it.
     fn settle_layout(&mut self) -> Result<(), String> {
         if self.layout_owed {
@@ -704,9 +741,16 @@ impl<'a, 'b> Runner<'a, 'b> {
                 }
             }
         };
+        // where things were laid out is worked out for the scripts that ask (`xfa.layout`), not for each one
+        let layout = if !ev.formcalc && (ev.script.contains("layout") || objects.prelude.contains("layout")) {
+            self.layout_boxes()
+        } else {
+            Default::default()
+        };
         let script = Script {
             prelude: objects.prelude,
             texts: objects.texts,
+            layout,
             source: ev.script.clone(),
             formcalc: ev.formcalc,
             event,

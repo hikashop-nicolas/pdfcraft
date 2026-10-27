@@ -175,6 +175,18 @@ pub struct Page {
     pub width: f64,
     pub height: f64,
     pub items: Vec<Item>,
+    /// Where each object of the form was laid out on this page, for `xfa.layout` in a script.
+    pub boxes: Vec<LayoutBox>,
+}
+
+/// An object of the form on a page: its SOM path, its class (`subform`, `field`, `pageArea`…) and where it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutBox {
+    pub som: String,
+    pub class: &'static str,
+    pub rect: Rect,
+    /// Part of the page area's own content (its master page), not of the flow.
+    pub master: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -285,7 +297,12 @@ struct Layouter<'t> {
     /// The flowed subforms being laid out, outermost first: a break between their children
     /// closes their parts on one content area and opens new ones on the next.
     frames: Vec<Frame>,
+    /// Drawing the page area's own items: what is laid out is the master page's.
+    in_master: bool,
 }
+
+/// The most objects noted per page (`xfa.layout`).
+const MAX_LAYOUT_BOXES: usize = 20_000;
 
 /// How many instances of a repeating subform to lay out: what the data holds once it holds
 /// any (rows added or removed), else the template's initial count; never below one, never
@@ -331,6 +348,7 @@ pub fn layout(tpl: &Template, data: Option<&DataNode>) -> Result<Form, XfaError>
         measures: Cell::new(0),
         leaves: Vec::new(),
         frames: Vec::new(),
+        in_master: false,
     };
     let ctx = Ctx { font: Font::default(), para: Para::default(), som: String::new() };
     l.new_page()?;
@@ -659,17 +677,27 @@ impl Layouter<'_> {
         if let Some(u) = self.uses.get_mut(idx) {
             *u += 1;
         }
-        self.pages.push(Page { width: area.width, height: area.height, items: Vec::new() });
+        self.pages.push(Page { width: area.width, height: area.height, items: Vec::new(), boxes: Vec::new() });
         let content = area.content.first().copied().unwrap_or(Rect::new(0.0, 0.0, area.width, area.height));
         self.cur = Some(Cursor { area: idx, content: 0, rect: content, y: content.y, placed: false });
         // Master page content: positioned draws and fields.
+        let area_som = area.name.clone().map(|n| format!("{n}[0]")).unwrap_or_else(|| format!("#pageArea[{idx}]"));
         let ctx = Ctx { font: Font::default(), para: Para::default(), som: area.name.clone().map(|n| format!("{n}[0]")).unwrap_or_default() };
         let page_rect = Rect::new(0.0, 0.0, area.width, area.height);
-        let sibs = SomIndices::of(&area.items);
-        for (i, item) in area.items.iter().enumerate() {
-            self.draw_positioned_child(item, page_rect, &ctx, 1, sibs.at(i))?;
+        self.record(&area_som, "pageArea", page_rect, true);
+        for (i, rect) in area.content.iter().enumerate() {
+            self.record(&format!("{area_som}.contentArea[{i}]"), "contentArea", *rect, false);
         }
-        Ok(())
+        let sibs = SomIndices::of(&area.items);
+        self.in_master = true;
+        let drawn = (|| {
+            for (i, item) in area.items.iter().enumerate() {
+                self.draw_positioned_child(item, page_rect, &ctx, 1, sibs.at(i))?;
+            }
+            Ok(())
+        })();
+        self.in_master = false;
+        drawn
     }
 
     /// Move to the next content area, or the next page.
@@ -1543,6 +1571,15 @@ impl Layouter<'_> {
         self.draw_node(k, Rect::new(inner.x + x, inner.y + y, w, h), ctx, depth + 1, sib)
     }
 
+    /// Note where an object of the form went on the page being laid out.
+    fn record(&mut self, som: &str, class: &'static str, rect: Rect, master: bool) {
+        if let Some(page) = self.pages.last_mut()
+            && page.boxes.len() < MAX_LAYOUT_BOXES
+        {
+            page.boxes.push(LayoutBox { som: som.to_string(), class, rect, master: master || self.in_master });
+        }
+    }
+
     fn draw_node(&mut self, node: &Node, rect: Rect, ctx: &Ctx, depth: usize, sib: usize) -> Result<(), XfaError> {
         if depth > MAX_DEPTH {
             return Ok(());
@@ -1550,6 +1587,23 @@ impl Layouter<'_> {
         let c = node.common();
         if c.presence == Presence::Invisible {
             return Ok(());
+        }
+        // An unnamed field or draw is `field[n]` or `draw[n]` for a script, as in the live form; an unnamed container has its
+        // parent's path and no box of its own.
+        let noted = match node {
+            Node::Subform(_) => c.name.is_some().then_some("subform"),
+            Node::Field(_) => Some("field"),
+            Node::ExclGroup(_) => c.name.is_some().then_some("exclGroup"),
+            Node::Draw(_) => Some("draw"),
+            Node::Area(_) => c.name.is_some().then_some("area"),
+        };
+        if let Some(class) = noted {
+            let som = match &c.name {
+                Some(_) => ctx.with_som(c, sib).som,
+                None if ctx.som.is_empty() => format!("{class}[{sib}]"),
+                None => format!("{}.{class}[{sib}]", ctx.som),
+            };
+            self.record(&som, class, rect, false);
         }
         match node {
             Node::Draw(d) => {
