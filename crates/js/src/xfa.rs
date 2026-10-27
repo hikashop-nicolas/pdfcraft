@@ -622,6 +622,10 @@ fn list_object(ctx: &mut Context, items: &[usize]) -> JsResult<JsValue> {
     Ok(ObjectInitializer::new(ctx)
         .property(js_string!("length"), JsValue::from(items.len() as f64), Attribute::READONLY)
         .property(js_string!("item"), item_fn, Attribute::all())
+        // changes to the form's structure from a script are not made here
+        .function(NativeFunction::from_fn_ptr(noop), js_string!("append"), 1)
+        .function(NativeFunction::from_fn_ptr(noop), js_string!("insert"), 2)
+        .function(NativeFunction::from_fn_ptr(noop), js_string!("remove"), 1)
         .build()
         .into())
 }
@@ -1060,6 +1064,7 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
         | "deleteItem"
         | "setItemState"
         | "clone" => function(ctx, NativeFunction::from_fn_ptr(noop)).into(),
+        "createNode" => function(ctx, NativeFunction::from_fn_ptr(sink_apply)).into(),
         "getItemState" => function(ctx, NativeFunction::from_fn_ptr(false_value)).into(),
         "getDisplayItem" | "getSaveItem" => function(ctx, NativeFunction::from_fn_ptr(empty_text)).into(),
         "getDeltas" => function(ctx, NativeFunction::from_fn_ptr(empty_list)).into(),
@@ -1078,10 +1083,27 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
             match found {
                 Some(c) => node_object(ctx, c)?,
                 // a script object or variable of the form is a child of its subform too (`xfa.form.nodes.item(0).LOV`)
-                None => script_object_named(ctx, other)?,
+                None => match document_property(ctx, other)? {
+                    Some(v) => v,
+                    None => script_object_named(ctx, other)?,
+                },
             }
         }
     })
+}
+
+/// `event.target` is the Acrobat document when an event is the form's own (`myDoc.resetForm([...])`, `myDoc.URL`): what a
+/// form's scripts ask of it, for a name no child of the node has.
+fn document_property(ctx: &mut Context, name: &str) -> JsResult<Option<JsValue>> {
+    Ok(Some(match name {
+        "resetForm" => function(ctx, NativeFunction::from_fn_ptr(reset_data)).into(),
+        "URL" | "path" | "documentFileName" => s(&host(ctx)?.borrow().doc.file_name),
+        "numPages" => JsValue::from(host(ctx)?.borrow().doc.page_count as f64),
+        "getField" | "info" => function(ctx, NativeFunction::from_fn_ptr(sink_apply)).into(),
+        "mailDoc" | "submitForm" | "saveAs" | "closeDoc" | "importDataObject" => function(ctx, NativeFunction::from_fn_ptr(noop)).into(),
+        "dirty" => JsValue::from(false),
+        _ => return Ok(None),
+    }))
 }
 
 /// The global object named `name`, when it is one a form defined (not what the host or JavaScript provides).
@@ -1167,6 +1189,8 @@ fn resolver(ctx: &mut Context, from: usize, many: bool) -> JsResult<JsValue> {
         }
         match found.first() {
             Some(i) => node_object(ctx, *i),
+            // a part of the template the host does not model (`field.caption.value.#text`) stands in as an object that takes anything
+            None if template_part_of_known_node(&host(ctx)?.borrow(), from, &expr) => sink(ctx),
             None => Ok(JsValue::null()),
         }
     }
@@ -1284,6 +1308,22 @@ fn layout_page_count(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<
 
 fn zero(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::from(0.0))
+}
+
+/// Whether `expr` names a part of the template (its caption, font, border…) below a node the form does have.
+fn template_part_of_known_node(h: &XHost, from: usize, expr: &str) -> bool {
+    const PARTS: &[&str] = &[
+        "caption", "ui", "font", "border", "assist", "para", "margin", "items", "validate", "format", "bind", "keep", "extras", "desc", "edge",
+        "corner", "fill",
+    ];
+    let segments: Vec<&str> = expr.split('.').collect();
+    let Some(k) = segments.iter().skip(1).position(|seg| {
+        let name = seg.split('[').next().unwrap_or(seg);
+        name.starts_with('#') || PARTS.contains(&name)
+    }) else {
+        return false;
+    };
+    !resolve_som(h, from, &segments[..=k].join(".")).is_empty()
 }
 
 fn xfa_resolve(ctx: &mut Context, many: bool) -> JsResult<JsValue> {

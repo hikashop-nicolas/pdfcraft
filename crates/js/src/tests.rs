@@ -1502,6 +1502,11 @@ mod session {
         assert_eq!(o.result.as_deref(), Some("total:0:0"), "{o:?}");
         let o = run(&mut s, "this.caption.value.resolveNode('#text').value.toString() + xfa.datasets.resolveNode('LOVFile')");
         assert_eq!(o.error, None, "{o:?}");
+        let o = run(
+            &mut s,
+            "var b = this.ui.oneOfChild.border; b.presence = 'visible'; for (var i = 0; i < 4; i++) { var e = b.getElement('edge', i); e.presence = 'visible'; e.color.value = '1'; var c = b.getElement('corner', i); c.color.value = '2'; } 3",
+        );
+        assert_eq!((o.error, o.result.as_deref()), (None, Some("3")));
         let o = run(&mut s, "xfa.datasets.createNode('dataGroup', 'LOVFile').loadXML('<a/>', 0, 1); qty.clearItems(); 5");
         assert_eq!((o.error, o.result.as_deref()), (None, Some("5")));
     }
