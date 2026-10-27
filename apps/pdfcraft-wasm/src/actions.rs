@@ -65,6 +65,14 @@ fn outcome_json(o: &Outcome) -> Value {
     out
 }
 
+/// The quoted text right after `call_start` in `call` (`xfa.host.messageBox("Hello")` gives `Hello`).
+fn quoted_argument(call: &str, call_start: &str) -> Option<String> {
+    let rest = &call[call.find(call_start)? + call_start.len()..];
+    let quote = rest.chars().next().filter(|c| matches!(c, '"' | '\''))?;
+    let end = rest[1..].find(quote)?;
+    Some(rest[1..1 + end].to_string())
+}
+
 /// A JavaScript string literal for `s`.
 fn quoted(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
@@ -159,20 +167,10 @@ impl Document {
                 reset = true;
             } else if call.contains("xfa.host.print") {
                 requests.push(Request::Print);
-            } else if let Some(i) = call.find("xfa.host.messageBox(") {
-                let rest = &call[i + "xfa.host.messageBox(".len()..];
-                if let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') {
-                    if let Some(end) = rest[1..].find(q) {
-                        alerts.push(rest[1..1 + end].to_string());
-                    }
-                }
-            } else if let Some(i) = call.find("xfa.host.gotoURL(") {
-                let rest = &call[i + "xfa.host.gotoURL(".len()..];
-                if let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') {
-                    if let Some(end) = rest[1..].find(q) {
-                        requests.push(Request::LaunchUrl(rest[1..1 + end].to_string()));
-                    }
-                }
+            } else if let Some(text) = quoted_argument(call, "xfa.host.messageBox(") {
+                alerts.push(text);
+            } else if let Some(url) = quoted_argument(call, "xfa.host.gotoURL(") {
+                requests.push(Request::LaunchUrl(url));
             }
         }
         if reset {
