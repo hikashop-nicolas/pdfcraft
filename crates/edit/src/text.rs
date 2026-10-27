@@ -2198,11 +2198,15 @@ fn type3_faces(text: &str, family: crate::added::Family, bold: bool) -> Result<(
     // The Chinese face (a small subset on the web) comes first for Chinese text, so its hanzi keep one
     // look, and last for the rest, where it only completes what the others lack.
     let hans = pdfcraft_fonts::ui_chinese_fonts();
+    // The Korean face likewise leads for text with Hangul.
+    let hang: Vec<&'static CraftFont> = pdfcraft_fonts::document_korean_font().into_iter().collect();
     if !text.chars().any(crate::bidi::is_hebrew) {
-        let faces = if crate::added::prefer_hans(text) {
-            hans.into_iter().chain(japanese).chain(latin).collect()
+        let faces = if text.chars().any(crate::added::is_hangul) {
+            hang.into_iter().chain(japanese).chain(latin).chain(hans).collect()
+        } else if crate::added::prefer_hans(text) {
+            hans.into_iter().chain(japanese).chain(latin).chain(hang).collect()
         } else {
-            japanese.into_iter().chain(latin).chain(hans).collect()
+            japanese.into_iter().chain(latin).chain(hans).chain(hang).collect()
         };
         return Ok((faces, false));
     }
@@ -2212,7 +2216,7 @@ fn type3_faces(text: &str, family: crate::added::Family, bold: bool) -> Result<(
         return Err(EditError::Invalid("Hebrew points (niqqud) can't be written into a PDF yet; type the text without them".into()));
     }
     let hebrew = pdfcraft_fonts::document_hebrew_font(bold).ok_or_else(no_hebrew_font)?;
-    Ok((std::iter::once(hebrew).chain(japanese).chain(latin).chain(hans).collect(), true))
+    Ok((std::iter::once(hebrew).chain(japanese).chain(latin).chain(hans).chain(hang).collect(), true))
 }
 
 fn type3_font(

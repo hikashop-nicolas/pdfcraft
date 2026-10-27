@@ -442,7 +442,7 @@ fn fallback_script(c: char) -> Option<ShapedScript> {
 }
 
 /// Whether `c` is Hangul: syllables, Jamo and compatibility Jamo.
-fn is_hangul(c: char) -> bool {
+pub(crate) fn is_hangul(c: char) -> bool {
     matches!(u32::from(c), 0x1100..=0x11FF | 0x3130..=0x318F | 0xA960..=0xA97F | 0xAC00..=0xD7FF)
 }
 

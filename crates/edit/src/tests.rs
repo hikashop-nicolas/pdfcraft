@@ -1529,6 +1529,27 @@ fn simplified_chinese_replacement_text_takes_the_chinese_face_for_hanzi_the_japa
 }
 
 #[test]
+fn korean_replacement_text_takes_the_korean_face() {
+    if without_craft_fonts("korean_replacement_text_takes_the_korean_face") {
+        return;
+    }
+    if !pdfcraft_fonts::hang_has('안') {
+        eprintln!("skipping: the craft-fonts input has no Hang face");
+        return;
+    }
+    // Korean with Latin letters and digits, which the face also has
+    let replacement = "안녕하세요 문서 2026";
+    let mut doc = styled_text_page("Helvetica");
+    text::replace_block(&mut doc, 0, 0, replacement).unwrap();
+    assert_eq!(text::text_lines(&reopen(&doc), 0).unwrap()[0].text, replacement);
+    assert!(!fallback_paths(&doc).is_empty());
+    // not what the Japanese text of the same page draws
+    let mut japanese = styled_text_page("Helvetica");
+    text::replace_block(&mut japanese, 0, 0, "見本商会　御中").unwrap();
+    assert_ne!(fallback_paths(&doc), fallback_paths(&japanese));
+}
+
+#[test]
 fn japanese_paragraph_fallback_honors_requested_family_and_weight() {
     if without_craft_fonts("japanese_paragraph_fallback_honors_requested_family_and_weight") {
         return;
