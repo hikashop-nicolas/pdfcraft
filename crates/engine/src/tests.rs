@@ -5537,9 +5537,22 @@ fn a_dynamic_xfa_form_whose_data_has_a_bare_ampersand_is_still_laid_out() {
     // what is saved back is well-formed
     s.apply(id, Edit::SetFieldValue { name: "familyName".into(), value: FieldValue::Text("Jones & Co".into()) }).unwrap();
     let saved = s.save_bytes(id).unwrap();
+    // the saved datasets stream itself, before any reader could repair it
     let cos = pdfcraft_cos::Document::open(saved).unwrap();
-    let xdp = pdfcraft_xfa::read_packets(&cos).unwrap().unwrap().xdp;
-    let data = pdfcraft_xfa::parse_datasets(&xdp).expect("the saved datasets are XML");
+    let acro = cos.get(cos.root().unwrap()).as_dict().and_then(|c| c.get(b"AcroForm").map(|a| cos.resolve(a))).unwrap();
+    let packets = acro.as_dict().and_then(|a| a.get(b"XFA").map(|x| cos.resolve(x))).unwrap();
+    // one XDP stream, or an array of packets in which the datasets one is named
+    let stream = match &*packets {
+        pdfcraft_cos::Object::Array(items) => {
+            let at = (0..items.len()).step_by(2).find(|&i| items[i].as_string().is_some_and(|s| s.to_text() == "datasets")).expect("a datasets packet");
+            cos.resolve(&items[at + 1])
+        }
+        _ => packets.clone(),
+    };
+    let pdfcraft_cos::Object::Stream(stream) = &*stream else { panic!("a stream") };
+    let text = String::from_utf8(stream.decoded().unwrap()).unwrap();
+    assert!(!text.contains("Jones & Co") && text.contains("Jones &amp; Co"), "{text}");
+    let data = pdfcraft_xfa::parse_datasets(&text).expect("the saved datasets are XML");
     assert_eq!(data.text_at(&pdfcraft_xfa::som_to_path("form[0].head[0].familyName[0]")), Some("Jones & Co"));
 }
 

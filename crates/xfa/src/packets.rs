@@ -107,7 +107,8 @@ fn to_text(bytes: &[u8]) -> String {
 pub(crate) fn repair_ampersands(text: String) -> String {
     // only the five predefined entities and numeric references are references; anything else is text
     let valid_reference = |rest: &str| -> bool {
-        let Some(end) = rest.find(';').filter(|e| *e > 1 && *e <= 32) else { return false };
+        // the `;` must come within the longest name (32), so a text full of `&` is not searched to its end each time
+        let Some(end) = rest.char_indices().take(34).find(|(_, c)| *c == ';').map(|(i, _)| i).filter(|e| *e > 1 && *e <= 32) else { return false };
         let name = &rest[1..end];
         match name.strip_prefix('#') {
             Some(num) => match num.strip_prefix(['x', 'X']) {
