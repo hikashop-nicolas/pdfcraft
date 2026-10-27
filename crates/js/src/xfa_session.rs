@@ -74,8 +74,7 @@ fn run_script(s: Script, doc: &XfaDoc, started: &dyn Fn()) -> XfaOutcome {
         started();
         return XfaOutcome { error: Some(format!("the form's script objects are too large ({} KiB)", s.prelude.len() / 1024)), ..Default::default() };
     }
-    let source = if s.prelude.is_empty() { s.source } else { format!("{}{}", s.prelude, s.source) };
-    crate::xfa::run_here(&source, &s.event, doc, s.root, s.limits, started)
+    crate::xfa::run_here_with(&s.source, &s.prelude, &s.event, doc, s.root, s.limits, started)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
