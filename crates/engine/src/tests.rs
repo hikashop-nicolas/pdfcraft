@@ -6184,11 +6184,13 @@ fn xfa_scripts_call_the_script_objects_of_their_subform() {
     let value = |n: &str| s.get(id).unwrap().form.iter().find(|f| f.name == n).map(|f| f.value.clone()).unwrap_or_else(|| panic!("no field {n}"));
     assert_eq!(value("total"), vec!["25".to_string()]);
     assert_eq!(value("label"), vec!["Hello Ada 7".to_string()]);
-    // an object named like a host global (util) replaces it; one that does not parse (E4X) is left out and fails only its user
+    // an object named like a host global (util) replaces it; one that is an XML literal (E4X) is left out and fails only its user
     assert_eq!(value("loud"), vec!["HEY!".to_string()]);
+    // a `<variables><text name="Mode">` is an object with a value
+    assert_eq!(value("mode"), vec!["on & \"quoted\"".to_string()]);
     let out = s.take_js_output(id);
     assert_eq!(out.errors.len(), 1, "{:?}", out.errors);
-    assert!(out.errors[0].contains("script object not loaded: Lov"), "{:?}", out.errors);
+    assert!(out.errors[0].contains("broken"), "{:?}", out.errors);
 }
 
 #[test]

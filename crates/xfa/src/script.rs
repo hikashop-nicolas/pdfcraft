@@ -757,7 +757,7 @@ pub fn script_objects_for(tpl: &Template, som: &str, script: &str) -> Result<Str
     // Inner objects hide outer ones of the same name.
     let mut objects: Vec<&ScriptObject> = Vec::new();
     for sf in &chain {
-        for o in &sf.script_objects {
+        for o in sf.script_objects.iter() {
             objects.retain(|x| x.name != o.name);
             objects.push(o);
         }
@@ -796,6 +796,15 @@ pub fn script_objects_for(tpl: &Template, som: &str, script: &str) -> Result<Str
     used.sort_by_key(|u| objects.iter().position(|o| std::ptr::eq(*o, *u)));
     let mut out = String::new();
     for o in used {
+        // an XML literal (E4X) is data the form reads, not code to run: it is an object holding the text
+        if o.variable || o.text.trim_start().starts_with('<') {
+            let value = js_string_literal(&o.text);
+            out.push_str(&format!(
+                "Object.defineProperty(globalThis, {:?}, {{ value: {{ value: {value}, rawValue: {value} }}, writable: true, configurable: true }});\n{OBJECT_END}",
+                o.name
+            ));
+            continue;
+        }
         let names = declared_names(&o.text);
         let members: Vec<String> = names.iter().map(|n| format!("{n}: typeof {n} === 'undefined' ? undefined : {n}")).collect();
         // defined on the global object so an object named like a host global (util, say) replaces it
@@ -805,6 +814,24 @@ pub fn script_objects_for(tpl: &Template, som: &str, script: &str) -> Result<Str
         ));
     }
     Ok(out)
+}
+
+/// `text` as a JavaScript string literal.
+fn js_string_literal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 || c == '\u{2028}' || c == '\u{2029}' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Ends each script object in the text [`script_objects_for`] returns, so one that does not load is skipped on its own.
@@ -862,6 +889,8 @@ fn declared_names(text: &str) -> Vec<String> {
     let mut declaring = false;
     // inside a `var a = 1, b = f(2, 3);` list: the bracket depth it sits at, so a comma at that depth names the next one
     let (mut depth, mut list): (i32, Option<i32>) = (0, None);
+    // the last byte of code before this one: comments and whitespace do not count
+    let mut last: Option<u8> = None;
     while i < b.len() && names.len() < 256 {
         let c = b[i];
         match c {
@@ -878,7 +907,7 @@ fn declared_names(text: &str) -> Vec<String> {
                 i += 2;
             }
             // a regular expression literal (after an operator or opening bracket): its quotes and brackets are not code
-            b'/' if b[..i].iter().rev().find(|c| !c.is_ascii_whitespace()).is_none_or(|p| b"=(,:[!&|?{};".contains(p)) => {
+            b'/' if last.is_none_or(|p| b"=(,:[!&|?{};".contains(&p)) => {
                 i += 1;
                 let mut class = false;
                 while i < b.len() && b[i] != b'\n' && (class || b[i] != b'/') {
@@ -892,6 +921,7 @@ fn declared_names(text: &str) -> Vec<String> {
                 }
                 i += 1;
                 declaring = false;
+                last = Some(b'/');
             }
             b'\'' | b'"' | b'`' => {
                 i += 1;
@@ -900,6 +930,7 @@ fn declared_names(text: &str) -> Vec<String> {
                 }
                 i += 1;
                 declaring = false;
+                last = Some(b'"');
             }
             c if c.is_ascii_alphabetic() || c == b'_' || c == b'$' => {
                 let start = i;
@@ -908,7 +939,8 @@ fn declared_names(text: &str) -> Vec<String> {
                 }
                 let word = &text[start..i];
                 // `a.function` or `x.var` is a property, not a declaration
-                let after_dot = text[..start].trim_end().ends_with('.');
+                let after_dot = last == Some(b'.');
+                last = Some(b'a');
                 if declaring && !RESERVED.contains(&word) && !after_dot {
                     if !names.iter().any(|n| n == word) && word.len() < 64 {
                         names.push(word.to_string());
@@ -924,6 +956,7 @@ fn declared_names(text: &str) -> Vec<String> {
             c if c.is_ascii_whitespace() || c == b'*' => i += 1,
             c => {
                 declaring = false;
+                last = Some(c);
                 match c {
                     b'(' | b'[' | b'{' => depth = depth.saturating_add(1),
                     b')' | b']' | b'}' => {
@@ -991,7 +1024,7 @@ mod script_object_tests {
             .expect("the page subform");
         let inner = std::mem::take(page);
         page.children.push(crate::model::Node::Subform(Box::new(crate::model::Subform {
-            script_objects: vec![crate::model::ScriptObject { name: "Mid".into(), text: "function m() { return 1; }".into() }],
+            script_objects: vec![crate::model::ScriptObject { name: "Mid".into(), text: "function m() { return 1; }".into(), variable: false }],
             children: vec![crate::model::Node::Subform(inner)],
             ..Default::default()
         })));
@@ -999,7 +1032,11 @@ mod script_object_tests {
         assert!(prelude.contains("\"Mid\""), "{prelude}");
         // objects that add up to more than the bound are refused, not built
         let (mut tpl, _) = crate::parse(&crate::fixtures::script_objects_template()).expect("parses");
-        tpl.root.script_objects.push(crate::model::ScriptObject { name: "Huge".into(), text: " ".repeat(super::MAX_SCRIPT_OBJECT_BYTES + 1) });
+        tpl.root.script_objects.push(crate::model::ScriptObject {
+            name: "Huge".into(),
+            text: " ".repeat(super::MAX_SCRIPT_OBJECT_BYTES + 1),
+            variable: false,
+        });
         let why = script_objects_for(&tpl, "form[0]", "Huge.x").unwrap_err();
         assert!(why.contains("too large"), "{why}");
     }
@@ -1015,6 +1052,8 @@ mod script_object_tests {
         );
         // words that are only keywords in some places are names
         assert_eq!(declared_names("var get = 1; function set() {} var of = 2, async = 3, static = 4;"), ["get", "set", "of", "async", "static"]);
+        // a comment ending in a period before `function` does not make it a property
+        assert_eq!(declared_names("// ends here.\nfunction f() {}\nvar x = a.\n// note\nb;"), ["f", "x"]);
         // a regular expression literal may hold quotes and a slash in a class without hiding what follows
         assert_eq!(declared_names("var r = /^[a-z'\"/]*$/g; var q = 8 / 2; function after() {}"), ["r", "q", "after"]);
     }

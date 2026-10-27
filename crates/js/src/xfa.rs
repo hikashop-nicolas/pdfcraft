@@ -542,9 +542,14 @@ fn node_object(ctx: &mut Context, idx: usize) -> JsResult<JsValue> {
 /// An object that takes any property read or write without complaint (`this.border.fill…`,
 /// `this.fillColor = …`): what a script sets there changes nothing here.
 fn sink(ctx: &mut Context) -> JsResult<JsValue> {
-    let target = ObjectInitializer::new(ctx).build();
-    let proxy = JsProxy::builder(target).get(sink_get).set(sink_set).build(ctx)?;
+    // A function underneath, so a call on it (`this.ui.resolveNode("#text")`) works too and gives another one.
+    let target: JsObject = function(ctx, NativeFunction::from_fn_ptr(noop)).into();
+    let proxy = JsProxy::builder(target).get(sink_get).set(sink_set).apply(sink_apply).build(ctx)?;
     Ok(proxy.into())
+}
+
+fn sink_apply(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    sink(ctx)
 }
 
 fn sink_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
@@ -553,9 +558,14 @@ fn sink_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
         return Ok(JsValue::undefined());
     }
     match text(&key, ctx)?.as_str() {
-        "value" | "toString" | "valueOf" => Ok(s("")),
+        "length" => Ok(JsValue::from(0)),
+        "toString" | "valueOf" => Ok(function(ctx, NativeFunction::from_fn_ptr(empty_text)).into()),
         _ => sink(ctx),
     }
+}
+
+fn empty_text(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(s(""))
 }
 
 fn sink_set(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
@@ -996,6 +1006,8 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
     let (name, som, kind, value, presence, access, index, parent, children) = snapshot;
     Ok(match key.as_str() {
         IDX => JsValue::from(idx as f64),
+        // On a draw `value` is the <value> element (`Rectangle3.value.rectangle.fill…`), not the text
+        "value" if kind == XfaKind::Draw => sink(ctx)?,
         "rawValue" | "value" => host(ctx)?.borrow().nodes.get(idx).map_or(JsValue::null(), value_js),
         "formattedValue" => s(&host(ctx)?.borrow().nodes.get(idx).and_then(|n| n.formatted.clone()).unwrap_or(value)),
         "name" => s(&name),
@@ -1043,7 +1055,14 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
         | "isPropertySpecified"
         | "loadXML"
         | "saveXML"
+        | "clearItems"
+        | "addItem"
+        | "deleteItem"
+        | "setItemState"
         | "clone" => function(ctx, NativeFunction::from_fn_ptr(noop)).into(),
+        "getItemState" => function(ctx, NativeFunction::from_fn_ptr(false_value)).into(),
+        "getDisplayItem" | "getSaveItem" => function(ctx, NativeFunction::from_fn_ptr(empty_text)).into(),
+        "getDeltas" => function(ctx, NativeFunction::from_fn_ptr(empty_list)).into(),
         "toString" | "valueOf" | "toJSON" => function(ctx, NativeFunction::from_fn_ptr(node_to_string)).into(),
         "length" => JsValue::undefined(),
         "border" | "ui" | "font" | "caption" | "fillColor" | "borderColor" | "fontColor" | "margin" | "para" | "assist" | "validate" | "format"
@@ -1058,10 +1077,20 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
             let found = child_named(&host(ctx)?.borrow(), idx, other);
             match found {
                 Some(c) => node_object(ctx, c)?,
-                None => JsValue::undefined(),
+                // a script object or variable of the form is a child of its subform too (`xfa.form.nodes.item(0).LOV`)
+                None => script_object_named(ctx, other)?,
             }
         }
     })
+}
+
+/// The global object named `name`, when it is one a form defined (not what the host or JavaScript provides).
+fn script_object_named(ctx: &mut Context, name: &str) -> JsResult<JsValue> {
+    if !is_identifier(name) || ["xfa", "app", "console", "event", "Math", "JSON", "Intl", "Reflect", "globalThis", "window"].contains(&name) {
+        return Ok(JsValue::undefined());
+    }
+    let v = ctx.global_object().get(JsString::from(name), ctx)?;
+    Ok(if v.as_object().is_some_and(|o| !o.is_callable()) { v } else { JsValue::undefined() })
 }
 
 fn node_set(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
@@ -1107,6 +1136,19 @@ fn node_to_string(this: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<
 
 fn noop(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::undefined())
+}
+
+fn null_value(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::null())
+}
+
+fn false_value(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
+    Ok(JsValue::from(false))
+}
+
+/// A list with nothing in it (`length` 0): the deltas, the page content, the nodes of a dataset that is not there.
+fn empty_list(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    list_object(ctx, &[])
 }
 
 /// `resolveNode(som)` / `resolveNodes(som)` bound to node `from`.
@@ -1252,7 +1294,7 @@ fn xfa_resolve(ctx: &mut Context, many: bool) -> JsResult<JsValue> {
 /// Defines the globals for one script on node `current`: `xfa` (`form`, `host`, `layout`, `event`,
 /// `resolveNode` and more), `event` as the same object as `xfa.event`, `app`, `console`, `util`,
 /// and the nodes in scope by name, with `_name` for each repeatable one's instance manager.
-fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current: usize) -> JsResult<()> {
+fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current: usize, code: &str) -> JsResult<()> {
     let rw = Attribute::CONFIGURABLE;
     let form = node_object(ctx, 0)?;
     let this_node = node_object(ctx, current)?;
@@ -1294,6 +1336,8 @@ fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current: usize) ->
         .function(NativeFunction::from_fn_ptr(zero), js_string!("x"), 2)
         .function(NativeFunction::from_fn_ptr(zero), js_string!("y"), 2)
         .function(NativeFunction::from_fn_ptr(zero), js_string!("pageSpan"), 1)
+        .function(NativeFunction::from_fn_ptr(empty_list), js_string!("pageContent"), 3)
+        .function(NativeFunction::from_fn_ptr(empty_list), js_string!("pageArea"), 1)
         .property(js_string!("ready"), JsValue::from(true), Attribute::READONLY)
         .build();
     let ev = ObjectInitializer::new(ctx)
@@ -1314,10 +1358,31 @@ fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current: usize) ->
         .function(NativeFunction::from_fn_ptr(noop), js_string!("emit"), 0)
         .function(NativeFunction::from_fn_ptr(noop), js_string!("reset"), 0)
         .build();
-    let datasets = ObjectInitializer::new(ctx).property(js_string!("data"), form.clone(), rw).build();
+    // The datasets are not editable from a script here: creating a node or loading XML into one changes nothing.
+    let dataset_nodes = sink(ctx)?;
+    let datasets = ObjectInitializer::new(ctx)
+        .property(js_string!("data"), form.clone(), rw)
+        .property(js_string!("nodes"), dataset_nodes, rw)
+        .function(NativeFunction::from_fn_ptr(sink_apply), js_string!("createNode"), 2)
+        .function(NativeFunction::from_fn_ptr(null_value), js_string!("resolveNode"), 1)
+        .function(NativeFunction::from_fn_ptr(empty_list), js_string!("resolveNodes"), 1)
+        .build();
     let template = sink(ctx)?;
     let resolve_one = xfa_resolve(ctx, false)?;
     let resolve_many = xfa_resolve(ctx, true)?;
+    // The SOM shortcuts a script may use as variables.
+    for (name, value) in [
+        ("$", &this_node),
+        ("$form", &form),
+        ("$record", &form),
+        ("$data", &form),
+        ("$host", &host_obj.clone().into()),
+        ("$layout", &layout.clone().into()),
+        ("$template", &template),
+        ("$event", &ev.clone().into()),
+    ] {
+        ctx.register_global_property(JsString::from(name), value.clone(), rw)?;
+    }
     let xfa = ObjectInitializer::new(ctx)
         .property(js_string!("form"), form.clone(), rw)
         .property(js_string!("host"), host_obj, rw)
@@ -1456,6 +1521,25 @@ fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current: usize) ->
                 ctx.register_global_property(JsString::from(format!("_{name}").as_str()), im, rw)?;
             }
             defined.push(name);
+        }
+    }
+    // A name the scopes do not reach but the code uses and the form holds once is that object (Acrobat finds it too).
+    let words: HashSet<&str> = code.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).filter(|w| !w.is_empty()).collect();
+    let defined: HashSet<String> = defined.into_iter().collect();
+    let mut unique: HashMap<String, Option<usize>> = HashMap::new();
+    {
+        let h = host(ctx)?.borrow();
+        for (i, n) in h.nodes.iter().enumerate() {
+            if n.gone || !words.contains(n.name.as_str()) || !is_identifier(&n.name) || defined.contains(&n.name) {
+                continue;
+            }
+            unique.entry(n.name.clone()).and_modify(|e| *e = None).or_insert(Some(i));
+        }
+    }
+    for (name, node) in unique {
+        if let Some(c) = node {
+            let obj = node_object(ctx, c)?;
+            ctx.register_global_property(JsString::from(name.as_str()), obj, rw)?;
         }
     }
     Ok(())
@@ -1638,7 +1722,7 @@ pub(crate) fn run_here_with(
     let mut out = XfaOutcome::default();
     let mut skipped: Vec<String> = Vec::new();
     let result = (|| -> JsResult<()> {
-        install(&mut ctx, event, doc, current)?;
+        install(&mut ctx, event, doc, current, &format!("{prelude}\n{script}"))?;
         // Ready for the script: its time starts now, the set-up above not charged to it.
         started();
         if !prelude.is_empty() {

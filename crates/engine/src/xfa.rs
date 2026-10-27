@@ -169,6 +169,14 @@ fn find_container<'a>(n: &'a FormNode, som: &str, depth: usize) -> Option<&'a Fo
     n.children.iter().find_map(|c| find_container(c, som, depth + 1))
 }
 
+/// Whether the form still holds an object at `som` (an instance a script took out, or that was never made, holds none).
+fn node_exists(n: &FormNode, som: &str, depth: usize) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    n.som == som || n.children.iter().any(|c| (som == c.som || som.starts_with(&format!("{}.", c.som))) && node_exists(c, som, depth + 1))
+}
+
 fn count_instances(root: &FormNode, parent_som: &str, name: &str) -> usize {
     let parent = if parent_som.is_empty() { Some(root) } else { find_container(root, parent_som, 0) };
     parent.map_or(0, |p| p.children.iter().filter(|c| c.name == name).count())
@@ -654,6 +662,10 @@ impl<'a, 'b> Runner<'a, 'b> {
     fn run(&mut self, ev: &ScriptEvent, new_text: &str) -> Result<Option<pdfcraft_js::xfa::XfaOutcome>, String> {
         if self.runs >= MAX_SCRIPTS_PER_EVENT || self.clock.spent() || self.run.ran_away {
             self.skipped += 1;
+            return Ok(None);
+        }
+        // an event of an instance the form no longer holds (a script removed it) has nothing to run on
+        if !ev.som.is_empty() && !node_exists(&self.live().root, &ev.som, 0) {
             return Ok(None);
         }
         self.runs += 1;

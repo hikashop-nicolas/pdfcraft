@@ -569,7 +569,14 @@ fn parse_script_objects(n: XmlNode) -> Vec<ScriptObject> {
             }
             let text = text_of(s);
             if !text.trim().is_empty() {
-                out.push(ScriptObject { name: name.to_string(), text });
+                out.push(ScriptObject { name: name.to_string(), text, variable: false });
+            }
+        }
+        for kind in ["text", "integer", "float", "decimal", "boolean", "date", "time", "dateTime"] {
+            for v in children(vars, kind).take(64) {
+                if let Some(name) = v.attribute("name").map(str::trim).filter(|n| is_js_identifier(n)) {
+                    out.push(ScriptObject { name: name.to_string(), text: text_of(v).trim().to_string(), variable: true });
+                }
             }
         }
     }

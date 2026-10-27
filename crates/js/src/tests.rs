@@ -1481,11 +1481,29 @@ mod session {
         huge.prelude = " ".repeat(crate::xfa_session::MAX_PRELUDE_BYTES + 1);
         let o = s.run(huge);
         assert!(o.error.as_deref().is_some_and(|e| e.contains("script objects are too large")), "{o:?}");
-        // a script object that does not parse fails the script, not the session
-        let mut broken = script("1", false, "form1[0].page1[0].total[0]", "calculate");
-        broken.prelude = "var Bad = (function () { ;return { ;\n".into();
-        assert!(s.run(broken).error.is_some());
+        // a script object that does not parse is left out: a script that uses it fails, one that does not still runs
+        let mut broken = script("Bad.x", false, "form1[0].page1[0].total[0]", "calculate");
+        broken.prelude = "Object.defineProperty(globalThis, \"Bad\", { value: (function () { ;return { ;\n/*__xfa_object_end__*/\n".into();
+        let o = s.run(broken);
+        assert!(o.error.as_deref().is_some_and(|e| e.contains("script object not loaded: Bad")), "{o:?}");
+        let mut unused = script("1", false, "form1[0].page1[0].total[0]", "calculate");
+        unused.prelude = "Object.defineProperty(globalThis, \"Bad\", { value: (function () { ;return { ;\n/*__xfa_object_end__*/\n".into();
+        assert_eq!(s.run(unused).result.as_deref(), Some("1"));
         assert_eq!(s.run(script("1 + 1", false, "form1[0].page1[0].total[0]", "calculate")).result.as_deref(), Some("2"));
+    }
+
+    /// What a form's scripts reach for that the host only stands in for: the SOM shortcuts, the lists and
+    /// datasets it keeps empty, and properties of the template (`caption.value.resolveNode(..)`) that take any call.
+    #[test]
+    fn a_script_may_use_the_shortcuts_and_the_template_parts_the_host_only_stands_in_for() {
+        let mut s = XfaSession::new(XfaDoc { page_count: 1, ..Default::default() });
+        let run = |s: &mut XfaSession, src: &str| s.run(script(src, false, "form1[0].page1[0].total[0]", "calculate"));
+        let o = run(&mut s, "$.name + ':' + (this.getDeltas().length) + ':' + xfa.layout.pageContent(0, '', false).length");
+        assert_eq!(o.result.as_deref(), Some("total:0:0"), "{o:?}");
+        let o = run(&mut s, "this.caption.value.resolveNode('#text').value.toString() + xfa.datasets.resolveNode('LOVFile')");
+        assert_eq!(o.error, None, "{o:?}");
+        let o = run(&mut s, "xfa.datasets.createNode('dataGroup', 'LOVFile').loadXML('<a/>', 0, 1); qty.clearItems(); 5");
+        assert_eq!((o.error, o.result.as_deref()), (None, Some("5")));
     }
 
     /// A JavaScript or FormCalc script whose engine takes longer to be ready than the script's

@@ -756,6 +756,7 @@ var step = 5;
 function twice(x) { return x * 2 + step; }
   </script>
   <script name="Unused" contentType="application/x-javascript">function never() { throw new Error("not defined unless used"); }</script>
+  <text name="Mode">on &amp; "quoted"</text>
   <script name="util" contentType="application/x-javascript">function shout(s) { return s.toUpperCase() + "!"; }</script>
   <script name="Lov" contentType="application/x-javascript">&lt;Lov&gt;&lt;Item&gt;1&lt;/Item&gt;&lt;/Lov&gt;</script>
  </variables>
@@ -772,6 +773,9 @@ function twice(x) { return x * 2 + step; }
   </field>
   <field name="loud" w="2in" h="0.3in"><ui><textEdit/></ui>
    <event activity="initialize"><script contentType="application/x-javascript">this.rawValue = util.shout("hey");</script></event>
+  </field>
+  <field name="mode" w="2in" h="0.3in"><ui><textEdit/></ui>
+   <event activity="initialize"><script contentType="application/x-javascript">this.rawValue = Mode.value;</script></event>
   </field>
   <field name="broken" w="2in" h="0.3in"><ui><textEdit/></ui>
    <event activity="initialize"><script contentType="application/x-javascript">this.rawValue = Lov.go();</script></event>

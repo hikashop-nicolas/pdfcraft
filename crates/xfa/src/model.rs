@@ -421,7 +421,10 @@ impl Default for Occur {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScriptObject {
     pub name: String,
+    /// The JavaScript, or for a `variable` the value it holds.
     pub text: String,
+    /// A `<variables><text name="…">` (or integer, float, boolean, date…): an object with a `value`, not code.
+    pub variable: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
