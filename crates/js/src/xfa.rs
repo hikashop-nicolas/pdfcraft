@@ -1636,6 +1636,7 @@ pub(crate) fn run_here_with(
     let current = host_state.current;
     ctx.insert_data(RefCell::new(host_state));
     let mut out = XfaOutcome::default();
+    let mut skipped: Vec<String> = Vec::new();
     let result = (|| -> JsResult<()> {
         install(&mut ctx, event, doc, current)?;
         // Ready for the script: its time starts now, the set-up above not charged to it.
@@ -1644,7 +1645,13 @@ pub(crate) fn run_here_with(
             if let Some(why) = crate::refuse_nesting(prelude) {
                 return Err(boa_engine::JsNativeError::range().with_message(why).into());
             }
-            ctx.eval(Source::from_bytes(prelude.as_bytes()))?;
+            // An object that does not load (E4X, say) is left out; the script fails only if it uses it.
+            for object in prelude.split("/*__xfa_object_end__*/\n").filter(|o| !o.trim().is_empty()) {
+                if let Err(e) = ctx.eval(Source::from_bytes(object.as_bytes())) {
+                    let name = object.split('"').nth(1).unwrap_or("?");
+                    skipped.push(format!("{name}: {e}"));
+                }
+            }
         }
         ctx.register_global_property(js_string!("__xfa_src"), s(script), Attribute::CONFIGURABLE)?;
         // Direct eval inside a function called on the node: `this` is the node and the
@@ -1662,7 +1669,8 @@ pub(crate) fn run_here_with(
         Ok(())
     })();
     if let Err(e) = result {
-        out.error = Some(e.to_string());
+        let skipped = if skipped.is_empty() { String::new() } else { format!(" (script object not loaded: {})", skipped.join("; ")) };
+        out.error = Some(format!("{e}{skipped}"));
     }
     if let Some(h) = ctx.remove_data::<Shared>() {
         let h = h.into_inner();

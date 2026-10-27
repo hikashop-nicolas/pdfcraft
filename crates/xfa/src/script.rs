@@ -798,10 +798,17 @@ pub fn script_objects_for(tpl: &Template, som: &str, script: &str) -> Result<Str
     for o in used {
         let names = declared_names(&o.text);
         let members: Vec<String> = names.iter().map(|n| format!("{n}: typeof {n} === 'undefined' ? undefined : {n}")).collect();
-        out.push_str(&format!("var {} = (function () {{\n{}\n;return {{ {} }};\n}})();\n", o.name, o.text, members.join(", ")));
+        // defined on the global object so an object named like a host global (util, say) replaces it
+        out.push_str(&format!(
+            "Object.defineProperty(globalThis, {:?}, {{ value: (function () {{\n{}\n;return {{ {} }};\n}})(), writable: true, configurable: true }});\n{OBJECT_END}",
+            o.name, o.text, members.join(", ")
+        ));
     }
     Ok(out)
 }
+
+/// Ends each script object in the text [`script_objects_for`] returns, so one that does not load is skipped on its own.
+pub const OBJECT_END: &str = "/*__xfa_object_end__*/\n";
 
 /// The most the script objects a script needs may add up to.
 pub const MAX_SCRIPT_OBJECT_BYTES: usize = 2 * 1024 * 1024;
@@ -869,6 +876,22 @@ fn declared_names(text: &str) -> Vec<String> {
                     i += 1;
                 }
                 i += 2;
+            }
+            // a regular expression literal (after an operator or opening bracket): its quotes and brackets are not code
+            b'/' if b[..i].iter().rev().find(|c| !c.is_ascii_whitespace()).is_none_or(|p| b"=(,:[!&|?{};".contains(p)) => {
+                i += 1;
+                let mut class = false;
+                while i < b.len() && b[i] != b'\n' && (class || b[i] != b'/') {
+                    match b[i] {
+                        b'\\' => i += 1,
+                        b'[' => class = true,
+                        b']' => class = false,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                i += 1;
+                declaring = false;
             }
             b'\'' | b'"' | b'`' => {
                 i += 1;
@@ -952,8 +975,8 @@ mod script_object_tests {
         let (tpl, _) = crate::parse(&crate::fixtures::script_objects_template()).expect("parses");
         let prelude = script_objects_for(&tpl, "form[0].page[0].total[0]", "this.rawValue = Names.greet('x');").unwrap();
         // Names is used directly, Calc by Names; Unused and the FormCalc object are not defined
-        assert!(prelude.contains("var Calc =") && prelude.contains("var Names ="), "{prelude}");
-        assert!(prelude.find("var Calc =") < prelude.find("var Names ="), "declared outer first");
+        assert!(prelude.contains("\"Calc\"") && prelude.contains("\"Names\""), "{prelude}");
+        assert!(prelude.find("\"Calc\"") < prelude.find("\"Names\""), "declared outer first");
         assert!(!prelude.contains("var Unused") && !prelude.contains("Formcalc"), "{prelude}");
         // from the root subform the inner object is out of reach, and a script that names none gets nothing
         assert!(!script_objects_for(&tpl, "form[0]", "Names.greet()").unwrap().contains("var Names"));
@@ -973,7 +996,7 @@ mod script_object_tests {
             ..Default::default()
         })));
         let prelude = script_objects_for(&tpl, "form[0].page[0].total[0]", "Mid.m()").unwrap();
-        assert!(prelude.contains("var Mid ="), "{prelude}");
+        assert!(prelude.contains("\"Mid\""), "{prelude}");
         // objects that add up to more than the bound are refused, not built
         let (mut tpl, _) = crate::parse(&crate::fixtures::script_objects_template()).expect("parses");
         tpl.root.script_objects.push(crate::model::ScriptObject { name: "Huge".into(), text: " ".repeat(super::MAX_SCRIPT_OBJECT_BYTES + 1) });
@@ -992,5 +1015,7 @@ mod script_object_tests {
         );
         // words that are only keywords in some places are names
         assert_eq!(declared_names("var get = 1; function set() {} var of = 2, async = 3, static = 4;"), ["get", "set", "of", "async", "static"]);
+        // a regular expression literal may hold quotes and a slash in a class without hiding what follows
+        assert_eq!(declared_names("var r = /^[a-z'\"/]*$/g; var q = 8 / 2; function after() {}"), ["r", "q", "after"]);
     }
 }
