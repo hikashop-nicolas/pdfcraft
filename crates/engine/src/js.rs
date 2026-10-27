@@ -228,7 +228,38 @@ pub fn document_scripts(cos: &pdfcraft_cos::Document) -> Vec<(String, String)> {
     pdfcraft_forms::document_scripts_named(cos)
 }
 
+/// The click script a template field named `name` carries, searching the template's subforms.
+fn xfa_click(nodes: &[pdfcraft_xfa::model::Node], name: &str) -> Option<String> {
+    use pdfcraft_xfa::model::Node;
+    let script =
+        |scripts: &[pdfcraft_xfa::model::Script]| scripts.iter().find(|s| s.activity == "click" && !s.text.trim().is_empty()).map(|s| s.text.clone());
+    for n in nodes {
+        let found = match n {
+            Node::Field(f) if f.common.name.as_deref() == Some(name) => script(&f.scripts),
+            Node::Subform(sf) => xfa_click(&sf.children, name),
+            Node::Area(a) => xfa_click(&a.children, name),
+            Node::ExclGroup(g) => g.fields.iter().find(|f| f.common.name.as_deref() == Some(name)).and_then(|f| script(&f.scripts)),
+            _ => None,
+        };
+        if found.is_some() {
+            return found;
+        }
+    }
+    None
+}
+
 impl crate::Document {
+    /// The click script of the XFA template's field behind the PDF field `name` (a static XFA form keeps a
+    /// button's behaviour there, not in an action), as XFA script text.
+    pub fn xfa_click_script(&self, name: &str) -> Option<String> {
+        let cos = &self.editor.as_ref()?.cos;
+        // "topmostSubform[0].Page1[0].Imprimer1[0]": the template names the last part, without its index
+        let leaf = name.rsplit('.').next()?;
+        let leaf = leaf.split('[').next()?;
+        let tpl = pdfcraft_xfa::template_of(cos).ok()?;
+        xfa_click(&tpl.root.children, leaf)
+    }
+
     /// Field Properties ▸ Actions: field `name`'s action per trigger.
     pub fn field_actions(&self, name: &str) -> Vec<(pdfcraft_forms::Trigger, pdfcraft_forms::FieldAction)> {
         self.editor.as_ref().and_then(|e| pdfcraft_forms::field_actions(&e.cos, name).ok()).unwrap_or_default()

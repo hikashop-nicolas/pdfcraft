@@ -122,7 +122,11 @@ impl Document {
         let v: Value = serde_json::from_str(action).map_err(|e| e.to_string())?;
         // `{"kind": "click"}`: the button's own click, which an XFA form keeps in its template (the PDF has no action for it)
         if v["kind"] == "click" {
-            return self.run_javascript("", Some(target.ok_or("a click needs a field")?));
+            let target = target.ok_or("a click needs a field")?;
+            if let Some(xfa) = self.doc()?.xfa_click_script(target) {
+                return self.run_xfa_click(&xfa, target);
+            }
+            return self.run_javascript("", Some(target));
         }
         let script = match parse_action(&v)? {
             FieldAction::JavaScript(s) => s,
@@ -141,6 +145,40 @@ impl Document {
             FieldAction::Other(_) => return Err("this action cannot be run".into()),
         };
         self.run_javascript(&script, target)
+    }
+
+    /// Does what a static XFA form's click script says, for the calls forms use on a button: reset the data, print,
+    /// show a message, open an address. Anything else it does is left out.
+    fn run_xfa_click(&mut self, script: &str, target: &str) -> Result<String, String> {
+        let mut alerts = Vec::new();
+        let mut requests = Vec::new();
+        let mut reset = false;
+        for call in script.split(';') {
+            let call = call.trim();
+            if call.contains("xfa.host.resetData") {
+                reset = true;
+            } else if call.contains("xfa.host.print") {
+                requests.push(Request::Print);
+            } else if let Some(i) = call.find("xfa.host.messageBox(") {
+                let rest = &call[i + "xfa.host.messageBox(".len()..];
+                if let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') {
+                    if let Some(end) = rest[1..].find(q) {
+                        alerts.push(rest[1..1 + end].to_string());
+                    }
+                }
+            } else if let Some(i) = call.find("xfa.host.gotoURL(") {
+                let rest = &call[i + "xfa.host.gotoURL(".len()..];
+                if let Some(q) = rest.chars().next().filter(|c| *c == '"' || *c == '\'') {
+                    if let Some(end) = rest[1..].find(q) {
+                        requests.push(Request::LaunchUrl(rest[1..1 + end].to_string()));
+                    }
+                }
+            }
+        }
+        if reset {
+            self.run_javascript("this.resetForm();", Some(target))?;
+        }
+        Ok(output_json(&alerts, &[], &requests, &[]).to_string())
     }
 
     /// What field scripts printed or asked for during edits since the last call (alerts, requests, errors).
