@@ -34,6 +34,8 @@ pub enum ShapedScript {
     Cjk,
     /// Simplified Chinese hanzi the Japanese face lacks, in the craft-fonts `Hans` face.
     Hans,
+    /// Korean Hangul, in the craft-fonts `Hang` face.
+    Hang,
 }
 
 impl ShapedScript {
@@ -45,6 +47,7 @@ impl ShapedScript {
             Self::Latin => crate::document_latin_fonts(false).into_iter().next(),
             Self::Cjk => crate::document_japanese_font_for_style(false, false),
             Self::Hans => crate::ui_chinese_fonts().into_iter().next(),
+            Self::Hang => crate::document_korean_font(),
         }
     }
 }
@@ -56,6 +59,7 @@ fn face(script: ShapedScript) -> Option<&'static (FontRef<'static>, ShaperData)>
     static LATIN: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     static CJK: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     static HANS: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
+    static HANG: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     let cache = match script {
         ShapedScript::Arabic => &FACE,
         ShapedScript::Hebrew => &HEBREW,
@@ -63,6 +67,7 @@ fn face(script: ShapedScript) -> Option<&'static (FontRef<'static>, ShaperData)>
         ShapedScript::Latin => &LATIN,
         ShapedScript::Cjk => &CJK,
         ShapedScript::Hans => &HANS,
+        ShapedScript::Hang => &HANG,
     };
     cache
         .get_or_init(|| {
@@ -121,6 +126,16 @@ pub fn hans_has(c: char) -> bool {
     face(ShapedScript::Hans).is_some_and(|(font, _)| font.charmap().map(c).is_some())
 }
 
+/// Whether the Korean craft-fonts face has a glyph for `c` (false without the face).
+pub fn hang_has(c: char) -> bool {
+    face(ShapedScript::Hang).is_some_and(|(font, _)| font.charmap().map(c).is_some())
+}
+
+/// Shape a run of Korean text with the `Hang` craft-fonts face, one cluster per character.
+pub fn shape_hang(text: &str) -> Result<Vec<ShapedCluster>, GlyphError> {
+    shape_script(text, false, ShapedScript::Hang)
+}
+
 /// Shape a run of Simplified Chinese text with the `Hans` craft-fonts face, one cluster per character.
 pub fn shape_hans(text: &str) -> Result<Vec<ShapedCluster>, GlyphError> {
     shape_script(text, false, ShapedScript::Hans)
@@ -148,11 +163,11 @@ fn shape_script(text: &str, rtl: bool, kind: ShapedScript) -> Result<Vec<ShapedC
         ShapedScript::Hebrew => buffer.set_script(script::HEBREW),
         ShapedScript::Thai => buffer.set_script(script::THAI),
         // Mixed scripts in one run: let the shaper read them off the text.
-        ShapedScript::Latin | ShapedScript::Cjk | ShapedScript::Hans => buffer.guess_segment_properties(),
+        ShapedScript::Latin | ShapedScript::Cjk | ShapedScript::Hans | ShapedScript::Hang => buffer.guess_segment_properties(),
     }
     // Preserve the historical Arabic per-character mapping; the others keep marks with their base.
     buffer.set_cluster_level(match kind {
-        ShapedScript::Arabic | ShapedScript::Cjk | ShapedScript::Hans => BufferClusterLevel::Characters,
+        ShapedScript::Arabic | ShapedScript::Cjk | ShapedScript::Hans | ShapedScript::Hang => BufferClusterLevel::Characters,
         ShapedScript::Hebrew | ShapedScript::Thai | ShapedScript::Latin => BufferClusterLevel::MonotoneGraphemes,
     });
     let shaped = shaper.shape(buffer, ShapeOptions::new());

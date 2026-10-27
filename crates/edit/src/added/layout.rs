@@ -1,7 +1,7 @@
 use super::types::{AddedImage, AddedText};
 use super::{
-    Content, Document, EditError, GlyphError, Level, ObjRef, Object, ParagraphBidiInfo, ShapedScript, shape_arabic, shape_cjk, shape_hans,
-    shape_hebrew, shape_latin, shape_thai,
+    Content, Document, EditError, GlyphError, Level, ObjRef, Object, ParagraphBidiInfo, ShapedScript, shape_arabic, shape_cjk, shape_hang,
+    shape_hans, shape_hebrew, shape_latin, shape_thai,
 };
 
 pub(super) fn nums(doc: &Document, o: Option<&Object>) -> Vec<f64> {
@@ -243,6 +243,8 @@ pub(super) fn fallback_script(c: char) -> Option<ShapedScript> {
     }
     if pdfcraft_fonts::latin_has(c) {
         Some(ShapedScript::Latin)
+    } else if is_hangul(c) && pdfcraft_fonts::hang_has(c) {
+        Some(ShapedScript::Hang)
     } else if pdfcraft_fonts::cjk_has(c) {
         Some(ShapedScript::Cjk)
     } else if pdfcraft_fonts::hans_has(c) {
@@ -250,6 +252,11 @@ pub(super) fn fallback_script(c: char) -> Option<ShapedScript> {
     } else {
         None
     }
+}
+
+/// Whether `c` is Hangul: syllables, Jamo and compatibility Jamo.
+fn is_hangul(c: char) -> bool {
+    matches!(u32::from(c), 0x1100..=0x11FF | 0x3130..=0x318F | 0xA960..=0xA97F | 0xAC00..=0xD7FF)
 }
 
 /// [`fallback_script`] for a text that [`prefer_hans`]: its hanzi come from the Chinese face when it has them,
@@ -291,7 +298,9 @@ fn is_cjk_char(c: char) -> bool {
 
 pub(super) fn fallback_error(e: GlyphError, text: &str) -> EditError {
     EditError::Invalid(match e {
-        GlyphError::NoFont => "this text needs a font this build doesn't include (Japanese and Chinese come with PdfCraft's craft-fonts)".into(),
+        GlyphError::NoFont => {
+            "this text needs a font this build doesn't include (Japanese, Chinese and Korean come with PdfCraft's craft-fonts)".into()
+        }
         GlyphError::Missing => format!("no font here can show \"{text}\""),
         GlyphError::TooComplex => format!("the font's glyphs for \"{text}\" are too complex"),
     })
@@ -412,6 +421,7 @@ pub(super) fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec
                     ShapedScript::Latin => shape_latin(&s).map_err(|e| fallback_error(e, &s))?,
                     ShapedScript::Cjk => shape_cjk(&s).map_err(|e| fallback_error(e, &s))?,
                     ShapedScript::Hans => shape_hans(&s).map_err(|e| fallback_error(e, &s))?,
+                    ShapedScript::Hang => shape_hang(&s).map_err(|e| fallback_error(e, &s))?,
                 };
                 Piece::Shaped(shaped)
             } else if run_rtl {

@@ -106,8 +106,11 @@ fn manifest(dir: &std::path::Path, manifest: &std::path::Path, wasm: bool, stric
         let devanagari = scripts.split(',').any(|s| s.trim() == "Deva");
         // A Simplified Chinese face that fits the CJK cap (a subset, say) is wanted by Edit text and Add text on the web.
         let small_hans = cjk && cjk_scripts::has_script_tag(scripts, "Hans");
+        // And a Korean one, for Hangul in the same two features.
+        let small_hang = cjk && cjk_scripts::has_script_tag(scripts, "Hang");
         let web_face = (*family == "BIZ UDPGothic" && *style == "Regular")
             || small_hans
+            || small_hang
             || arabic
             || telugu
             || hebrew
