@@ -1413,6 +1413,7 @@ mod session {
     fn script(source: &str, formcalc: bool, target: &str, activity: &str) -> Script {
         Script {
             prelude: String::new(),
+            texts: Vec::new(),
             source: source.into(),
             formcalc,
             event: XfaEvent { activity: activity.into(), target: target.into(), ..Default::default() },
@@ -1441,10 +1442,21 @@ mod session {
         let mut with = script("qty * price", true, "form1[0].page1[0].total[0]", "calculate");
         with.root.children[0].children[0].value = "10".into();
         assert_eq!(s.run(with).result.as_deref(), Some("25"));
-        // Nor do variables, globals, prototype changes or kept objects.
-        s.run(script("leak = 5; String.prototype.trim = function () { return 'P' }; kept = qty; 1", false, "form1[0].page1[0].qty[0]", "calculate"));
-        let o = s.run(script("typeof leak + ':' + ' x '.trim() + ':' + typeof kept", false, "form1[0].page1[0].qty[0]", "calculate"));
-        assert_eq!(o.result.as_deref(), Some("undefined:x:undefined"));
+        // The JavaScript engine is the session's: globals and what a script kept are there for the next one, as in one
+        // Acrobat document, while the form keeps its structure.
+        s.run(script("leak = 5; kept = qty; 1", false, "form1[0].page1[0].qty[0]", "calculate"));
+        let o = s.run(script("typeof leak + ':' + typeof kept", false, "form1[0].page1[0].qty[0]", "calculate"));
+        assert_eq!(o.result.as_deref(), Some("number:object"));
+        // A form with another structure (an instance added) starts a new one.
+        let mut grown = script("typeof leak", false, "form1[0].page1[0].qty[0]", "calculate");
+        grown.root.children[0].children.push(crate::xfa::XfaNode {
+            name: "extra".into(),
+            som: "form1[0].page1[0].extra[0]".into(),
+            kind: Some(XfaKind::Field),
+            ..Default::default()
+        });
+        assert_eq!(s.run(grown).result.as_deref(), Some("undefined"));
+        // A script that froze the global object does not stop the ones after it.
         s.run(script("Object.freeze(globalThis); 1", false, "form1[0].page1[0].qty[0]", "calculate"));
         let o = s.run(script("xfa.host.numPages", false, "form1[0].page1[0].qty[0]", "calculate"));
         assert_eq!(o.result.as_deref(), Some("3"), "{o:?}");

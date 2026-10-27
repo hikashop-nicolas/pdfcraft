@@ -1,11 +1,12 @@
 //! One script engine for a whole form event. Every script of the event runs on one thread
-//! (with the script stack), each in a fresh JavaScript context on a fresh copy of the form as
-//! the caller holds it, so scripts can't see each other's variables or objects and a script
-//! that failed halfway leaves no state behind in the engine; what a script changed (up to its
-//! error, when it failed) reaches the next one only through the caller, which applies the
-//! effects and sends the form as it then is. Before,
-//! every script also got a thread of its own and the caller rebuilt the form for each: a form
-//! with hundreds of calculations spent its open-time budget on that.
+//! (with the script stack), in one JavaScript engine for as long as the form keeps its structure,
+//! as in one Acrobat document: the script objects the scripts call are read once, and a global or
+//! a kept object is there for the next script. Each script still gets the form as the caller holds
+//! it, and what a script changed (up to its error, when it failed) reaches the next one through
+//! the caller, which applies the effects and sends the form as it then is. A script that changes
+//! the form's structure (a row added), or freezes the global object, gets the next one a fresh
+//! engine. Before, every script also got a thread of its own and the caller rebuilt the form for
+//! each: a form with hundreds of calculations spent its open-time budget on that.
 //!
 //! A script that runs past its time limit is abandoned on the thread and the session is dead
 //! from then on. A script that fails from a fault in the engine (a panic) loses only itself:
@@ -39,6 +40,8 @@ pub struct Script {
     /// The script objects the source calls, defined in front of it (read for what they are: part of the form, not a
     /// script to size up on its own, though bounded by [`MAX_PRELUDE_BYTES`]).
     pub prelude: String,
+    /// The text of the script objects that are data (`__xfa_text(name)` in the prelude reads it), by name.
+    pub texts: Vec<(String, String)>,
     pub source: String,
     pub formcalc: bool,
     pub event: XfaEvent,
@@ -74,7 +77,8 @@ fn run_script(s: Script, doc: &XfaDoc, started: &dyn Fn()) -> XfaOutcome {
         started();
         return XfaOutcome { error: Some(format!("the form's script objects are too large ({} KiB)", s.prelude.len() / 1024)), ..Default::default() };
     }
-    crate::xfa::run_here_with(&s.source, &s.prelude, &s.event, doc, s.root, s.limits, started)
+    let code = crate::xfa::ScriptCode { prelude: &s.prelude, texts: s.texts, shared: true };
+    crate::xfa::run_here_with(&s.source, code, &s.event, doc, s.root, s.limits, started)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -144,6 +148,8 @@ mod native {
                         });
                         let _ = reply.send(Reply::Outcome(Box::new(o)));
                     }
+                    // the session is over: the engine its scripts shared goes before the thread does
+                    crate::xfa::drop_shared();
                 });
                 spawned.map_err(|e| format!("the script engine could not start: {e}"))?;
                 super::ENGINES_STARTED.with(|n| n.set(n.get().saturating_add(1)));
@@ -230,6 +236,8 @@ mod native {
 
     impl XfaSession {
         pub fn new(doc: XfaDoc) -> XfaSession {
+            // what an earlier session left in the engine is not this one's
+            crate::xfa::drop_shared();
             XfaSession { doc }
         }
 
@@ -244,6 +252,12 @@ mod native {
 
         pub fn run(&mut self, script: Script) -> XfaOutcome {
             run_script(script, &self.doc, &|| {})
+        }
+    }
+
+    impl Drop for XfaSession {
+        fn drop(&mut self) {
+            crate::xfa::drop_shared();
         }
     }
 }

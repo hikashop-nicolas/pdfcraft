@@ -264,6 +264,9 @@ struct Runner<'a, 'b> {
     skipped: usize,
     relayouts: usize,
     relayouts_skipped: bool,
+    /// A script changed what the form shows (a row added, a field hidden): the widgets are laid out again when something needs
+    /// them (a value for a widget that is not there yet) or when the event ends, not after each script.
+    layout_owed: bool,
     dropped_output: usize,
     truncated_warned: bool,
     data: Option<pdfcraft_xfa::DataNode>,
@@ -299,6 +302,7 @@ impl<'a, 'b> Runner<'a, 'b> {
             skipped: 0,
             relayouts: 0,
             relayouts_skipped: false,
+            layout_owed: false,
             dropped_output: 0,
             truncated_warned: false,
             data,
@@ -428,6 +432,8 @@ impl<'a, 'b> Runner<'a, 'b> {
     fn set_value(&mut self, som: &str, value: &str) -> bool {
         use pdfcraft_forms::FieldKind as K;
         let path = pdfcraft_xfa::data_path(self.tpl, som);
+        // A widget a script just made (a row it added) is not there until the form is laid out again; its value is in the
+        // data, which is what the layout reads.
         let names = self.widgets_at(&path);
         // The data text: the widget at `som` says how its kind writes the value; without one,
         // the first widget bound to the node, else the value itself.
@@ -514,6 +520,15 @@ impl<'a, 'b> Runner<'a, 'b> {
         Ok(())
     }
 
+    /// Lay the form out now if a script owes it.
+    fn settle_layout(&mut self) -> Result<(), String> {
+        if self.layout_owed {
+            self.layout_owed = false;
+            self.relayout()?;
+        }
+        Ok(())
+    }
+
     /// Lay the form out again and give the new widgets their appearances.
     fn relayout(&mut self) -> Result<(), String> {
         if self.relayouts >= MAX_RELAYOUTS_PER_EVENT {
@@ -540,6 +555,7 @@ impl<'a, 'b> Runner<'a, 'b> {
 
     /// `xfa.host.resetData`: the fields back to their defaults, in the form and the data.
     fn reset(&mut self, names: &[String]) -> Result<(), String> {
+        self.settle_layout()?;
         self.flush()?;
         let by_som = self.by_som().clone();
         let listed: Option<Vec<String>> = if names.is_empty() {
@@ -645,6 +661,9 @@ impl<'a, 'b> Runner<'a, 'b> {
                 XfaEffect::LaunchUrl(u) => self.run.out.requests.push(Request::LaunchUrl(u.clone())),
                 XfaEffect::ShowPanel(p) => self.run.out.requests.push(Request::ShowPanel(*p)),
                 XfaEffect::SetFocus(som) => {
+                    if !self.by_som().contains_key(som) {
+                        self.settle_layout()?;
+                    }
                     if let Some(name) = self.by_som().get(som).cloned() {
                         self.run.out.requests.push(Request::Focus(name));
                     }
@@ -674,11 +693,11 @@ impl<'a, 'b> Runner<'a, 'b> {
         let event = XfaEvent { activity: ev.activity.clone(), target: ev.som.clone(), new_text: new_text.to_string(), prev_text: String::new() };
         let root = to_js(&self.live().root);
         // a JavaScript event may call the script objects of its subform, which are defined in front of it
-        let prelude = if ev.formcalc {
-            String::new()
+        let objects = if ev.formcalc {
+            pdfcraft_xfa::ScriptObjects::default()
         } else {
             match pdfcraft_xfa::script_objects_for(self.tpl, &ev.som, &ev.script) {
-                Ok(prelude) => prelude,
+                Ok(objects) => objects,
                 Err(why) => {
                     self.error(format!("{} ({}): {why}", ev.som, ev.activity));
                     return Ok(None);
@@ -686,7 +705,8 @@ impl<'a, 'b> Runner<'a, 'b> {
             }
         };
         let script = Script {
-            prelude,
+            prelude: objects.prelude,
+            texts: objects.texts,
             source: ev.script.clone(),
             formcalc: ev.formcalc,
             event,
@@ -712,7 +732,7 @@ impl<'a, 'b> Runner<'a, 'b> {
             self.error(format!("{} ({}): {e}", ev.som, ev.activity));
         }
         if self.apply_effects(ev, &o.effects)? {
-            self.relayout()?;
+            self.layout_owed = true;
         }
         Ok(Some(o))
     }
@@ -742,9 +762,10 @@ impl<'a, 'b> Runner<'a, 'b> {
     fn finish(mut self) -> Result<Changes, String> {
         #[cfg(test)]
         self.check_live();
-        if self.relayouts_skipped {
+        if self.relayouts_skipped || self.layout_owed {
             self.relayouts = 0;
             self.relayouts_skipped = false;
+            self.layout_owed = false;
             self.relayout()?;
         }
         self.flush()?;

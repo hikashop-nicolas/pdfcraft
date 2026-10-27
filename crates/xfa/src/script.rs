@@ -742,7 +742,7 @@ pub fn data_of(doc: &Document) -> Option<DataNode> {
 /// `<variables><script name="LOVUtils">` of the subform the script sits in, or of one above it. Only the objects
 /// the script uses (and those they use) are defined, since every script runs in a fresh context. Empty when it uses none.
 /// `Err` when the objects it needs add up to more than [`MAX_SCRIPT_OBJECT_BYTES`].
-pub fn script_objects_for(tpl: &Template, som: &str, script: &str) -> Result<String, String> {
+pub fn script_objects_for(tpl: &Template, som: &str, script: &str) -> Result<ScriptObjects, String> {
     // The subforms from the root down to the one holding the script, as the SOM names them (unnamed ones in between too).
     let mut chain: Vec<&Subform> = vec![&tpl.root];
     for part in som.split('.').skip(1) {
@@ -763,7 +763,7 @@ pub fn script_objects_for(tpl: &Template, som: &str, script: &str) -> Result<Str
         }
     }
     if objects.is_empty() {
-        return Ok(String::new());
+        return Ok(ScriptObjects::default());
     }
     let mentions = |text: &str, name: &str| -> bool {
         text.match_indices(name).any(|(i, _)| {
@@ -788,32 +788,58 @@ pub fn script_objects_for(tpl: &Template, som: &str, script: &str) -> Result<Str
                     ));
                 }
                 used.push(o);
-                texts.push(&o.text);
+                // data is not read for the names it mentions
+                if !is_data(o) {
+                    texts.push(&o.text);
+                }
             }
         }
     }
     // Defined in the order they were declared.
     used.sort_by_key(|u| objects.iter().position(|o| std::ptr::eq(*o, *u)));
-    let mut out = String::new();
+    let mut out = ScriptObjects::default();
     for o in used {
-        // an XML literal (E4X) is data the form reads, not code to run: it is an object holding the text
-        if o.variable || o.text.trim_start().starts_with('<') {
+        // a variable is an object with its value
+        if o.variable {
             let value = js_string_literal(&o.text);
-            out.push_str(&format!(
+            out.prelude.push_str(&format!(
                 "Object.defineProperty(globalThis, {:?}, {{ value: {{ value: {value}, rawValue: {value} }}, writable: true, configurable: true }});\n{OBJECT_END}",
                 o.name
             ));
             continue;
         }
+        // an XML literal (E4X) is data the form reads, not code to run: an object holding the text, which stays out of the
+        // script so that the engine does not read it again for every script that can reach it
+        if is_data(o) {
+            out.prelude.push_str(&format!(
+                "Object.defineProperty(globalThis, {:?}, {{ get: function () {{ var t = __xfa_text({:?}); return {{ value: t, rawValue: t }}; }}, configurable: true }});\n{OBJECT_END}",
+                o.name, o.name
+            ));
+            out.texts.push((o.name.clone(), o.text.clone()));
+            continue;
+        }
         let names = declared_names(&o.text);
         let members: Vec<String> = names.iter().map(|n| format!("{n}: typeof {n} === 'undefined' ? undefined : {n}")).collect();
         // defined on the global object so an object named like a host global (util, say) replaces it
-        out.push_str(&format!(
+        out.prelude.push_str(&format!(
             "Object.defineProperty(globalThis, {:?}, {{ value: (function () {{\n{}\n;return {{ {} }};\n}})(), writable: true, configurable: true }});\n{OBJECT_END}",
             o.name, o.text, members.join(", ")
         ));
     }
     Ok(out)
+}
+
+/// What a script's script objects come to: the JavaScript that defines them, and the text of the ones that are data (read
+/// by `__xfa_text(name)`, not parsed).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ScriptObjects {
+    pub prelude: String,
+    pub texts: Vec<(String, String)>,
+}
+
+/// A script object that holds data the form reads: a variable, or an XML literal.
+fn is_data(o: &ScriptObject) -> bool {
+    o.variable || o.text.trim_start().starts_with('<')
 }
 
 /// `text` as a JavaScript string literal.
@@ -1001,19 +1027,19 @@ fn subform_path<'a>(nodes: &'a [Node], name: &str, path: &mut Vec<&'a Subform>) 
 
 #[cfg(test)]
 mod script_object_tests {
-    use super::{declared_names, script_objects_for};
+    use super::{ScriptObjects, declared_names, script_objects_for};
 
     #[test]
     fn a_script_gets_the_objects_it_uses_from_its_subforms() {
         let (tpl, _) = crate::parse(&crate::fixtures::script_objects_template()).expect("parses");
-        let prelude = script_objects_for(&tpl, "form[0].page[0].total[0]", "this.rawValue = Names.greet('x');").unwrap();
+        let prelude = script_objects_for(&tpl, "form[0].page[0].total[0]", "this.rawValue = Names.greet('x');").unwrap().prelude;
         // Names is used directly, Calc by Names; Unused and the FormCalc object are not defined
         assert!(prelude.contains("\"Calc\"") && prelude.contains("\"Names\""), "{prelude}");
         assert!(prelude.find("\"Calc\"") < prelude.find("\"Names\""), "declared outer first");
         assert!(!prelude.contains("var Unused") && !prelude.contains("Formcalc"), "{prelude}");
         // from the root subform the inner object is out of reach, and a script that names none gets nothing
-        assert!(!script_objects_for(&tpl, "form[0]", "Names.greet()").unwrap().contains("var Names"));
-        assert_eq!(script_objects_for(&tpl, "form[0].page[0].total[0]", "this.rawValue = 1;").unwrap(), "");
+        assert!(!script_objects_for(&tpl, "form[0]", "Names.greet()").unwrap().prelude.contains("var Names"));
+        assert_eq!(script_objects_for(&tpl, "form[0].page[0].total[0]", "this.rawValue = 1;").unwrap(), ScriptObjects::default());
         // the objects of an unnamed subform between named ones reach the scripts below it
         let (mut tpl, _) = crate::parse(&crate::fixtures::script_objects_template()).expect("parses");
         let page = tpl
@@ -1028,7 +1054,7 @@ mod script_object_tests {
             children: vec![crate::model::Node::Subform(inner)],
             ..Default::default()
         })));
-        let prelude = script_objects_for(&tpl, "form[0].page[0].total[0]", "Mid.m()").unwrap();
+        let prelude = script_objects_for(&tpl, "form[0].page[0].total[0]", "Mid.m()").unwrap().prelude;
         assert!(prelude.contains("\"Mid\""), "{prelude}");
         // objects that add up to more than the bound are refused, not built
         let (mut tpl, _) = crate::parse(&crate::fixtures::script_objects_template()).expect("parses");

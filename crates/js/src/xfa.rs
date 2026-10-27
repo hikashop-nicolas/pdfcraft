@@ -261,6 +261,11 @@ pub(crate) struct HNode {
 /// The form as a script sees and changes it, with the effects it records.
 pub(crate) struct XHost {
     pub(crate) nodes: Vec<HNode>,
+    /// The text of the form's data script objects, by name (`__xfa_text`).
+    pub(crate) texts: Vec<(String, String)>,
+    /// A fingerprint of the form's structure (its objects and their paths, not their values): what a script engine kept
+    /// across scripts is good for as long as it is the same.
+    pub(crate) shape: u64,
     pub(crate) effects: Vec<XfaEffect>,
     pub(crate) console: Vec<String>,
     pub(crate) doc: XfaDoc,
@@ -291,8 +296,20 @@ impl XHost {
         let mut nodes = Vec::new();
         flatten(&form, None, &mut nodes, 0);
         let current = nodes.iter().position(|n| n.som == target && n.kind != XfaKind::Form).unwrap_or(1.min(nodes.len().saturating_sub(1)));
+        let shape = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for n in &nodes {
+                n.som.hash(&mut h);
+                (n.kind as u8).hash(&mut h);
+                n.gone.hash(&mut h);
+            }
+            h.finish()
+        };
         XHost {
             nodes,
+            texts: Vec::new(),
+            shape,
             effects: Vec::new(),
             console: Vec::new(),
             doc: doc.clone(),
@@ -1160,6 +1177,13 @@ fn noop(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::undefined())
 }
 
+/// `__xfa_text(name)`: the text of a data script object.
+fn xfa_text(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let name = text(&arg(args, 0), ctx)?;
+    let found = host(ctx)?.borrow().texts.iter().find(|(n, _)| *n == name).map(|(_, t)| t.clone());
+    Ok(s(&found.unwrap_or_default()))
+}
+
 fn null_value(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::null())
 }
@@ -1334,7 +1358,7 @@ fn xfa_resolve(ctx: &mut Context, many: bool) -> JsResult<JsValue> {
 /// Defines the globals for one script on node `current`: `xfa` (`form`, `host`, `layout`, `event`,
 /// `resolveNode` and more), `event` as the same object as `xfa.event`, `app`, `console`, `util`,
 /// and the nodes in scope by name, with `_name` for each repeatable one's instance manager.
-fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current: usize, code: &str) -> JsResult<()> {
+fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current: usize, code: &str) -> JsResult<Vec<String>> {
     let rw = Attribute::CONFIGURABLE;
     let form = node_object(ctx, 0)?;
     let this_node = node_object(ctx, current)?;
@@ -1470,6 +1494,8 @@ fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current: usize, co
         .function(NativeFunction::from_fn_ptr(scand), js_string!("scand"), 2)
         .build();
     ctx.register_global_property(js_string!("util"), util, rw)?;
+    let xfa_text_fn = function(ctx, NativeFunction::from_fn_ptr(xfa_text));
+    ctx.register_global_property(js_string!("__xfa_text"), xfa_text_fn, rw)?;
     // Unqualified names: the current node's children, its siblings, then each ancestor's
     // children, the nearest first. Instance managers as `_name`.
     let scopes: Vec<usize> = {
@@ -1542,6 +1568,28 @@ fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current: usize, co
         "Intl",
     ];
     let mut defined: Vec<String> = RESERVED.iter().map(ToString::to_string).collect();
+    // Every global this set-up gives, for the next script to take away.
+    let mut installed: Vec<String> = [
+        "xfa",
+        "event",
+        "__xfa_this",
+        "app",
+        "console",
+        "util",
+        "__xfa_text",
+        "__xfa_src",
+        "$",
+        "$form",
+        "$record",
+        "$data",
+        "$host",
+        "$layout",
+        "$template",
+        "$event",
+    ]
+    .iter()
+    .map(ToString::to_string)
+    .collect();
     for scope in scopes {
         let kids: Vec<(usize, String, bool)> = {
             let h = host(ctx)?.borrow();
@@ -1556,9 +1604,11 @@ fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current: usize, co
             }
             let obj = node_object(ctx, c)?;
             ctx.register_global_property(JsString::from(name.as_str()), obj, rw)?;
+            installed.push(name.clone());
             if repeatable {
                 let im = instance_manager(ctx, scope, &name)?;
                 ctx.register_global_property(JsString::from(format!("_{name}").as_str()), im, rw)?;
+                installed.push(format!("_{name}"));
             }
             defined.push(name);
         }
@@ -1580,9 +1630,10 @@ fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current: usize, co
         if let Some(c) = node {
             let obj = node_object(ctx, c)?;
             ctx.register_global_property(JsString::from(name.as_str()), obj, rw)?;
+            installed.push(name);
         }
     }
-    Ok(())
+    Ok(installed)
 }
 
 fn is_identifier(name: &str) -> bool {
@@ -1735,34 +1786,50 @@ pub(crate) fn warm_up() {
 
 /// `started` is called once the engine is ready: a time limit on the script runs from then.
 pub(crate) fn run_here(script: &str, event: &XfaEvent, doc: &XfaDoc, root: XfaNode, limits: Limits, started: &dyn Fn()) -> XfaOutcome {
-    run_here_with(script, "", event, doc, root, limits, started)
+    run_here_with(script, ScriptCode { prelude: "", texts: Vec::new(), shared: false }, event, doc, root, limits, started)
 }
 
 /// [`run_here`] with `prelude`, the form's script objects, defined first. They are part of the form, so they are not held
 /// to the size a script may have (their own bound is the caller's), only to its nesting.
 pub(crate) fn run_here_with(
     script: &str,
-    prelude: &str,
+    objects: ScriptCode<'_>,
     event: &XfaEvent,
     doc: &XfaDoc,
     root: XfaNode,
     limits: Limits,
     started: &dyn Fn(),
 ) -> XfaOutcome {
+    let ScriptCode { prelude, texts, shared } = objects;
     warm_up();
-    let mut ctx = match Context::builder().host_hooks(std::rc::Rc::new(crate::CheckedCodeFromStrings)).build() {
-        Ok(ctx) => ctx,
-        Err(e) => return XfaOutcome { error: Some(format!("the script engine could not start: {e}")), ..Default::default() },
+    let mut host_state = XHost::new(root, &event.target, doc);
+    host_state.texts = texts;
+    let current = host_state.current;
+    // The engine a session's earlier script left is used again while the form has the same structure: the script objects
+    // it defined (read once, with the state they hold) are there for this script.
+    let kept = if shared { PERSIST.with(|p| p.borrow_mut().take()).filter(|p| p.shape == host_state.shape) } else { None };
+    let mut persist = match kept {
+        Some(p) => p,
+        None => match Context::builder().host_hooks(std::rc::Rc::new(crate::CheckedCodeFromStrings)).build() {
+            Ok(ctx) => Persist { shape: host_state.shape, ctx, defined: HashMap::new(), names: Vec::new() },
+            Err(e) => return XfaOutcome { error: Some(format!("the script engine could not start: {e}")), ..Default::default() },
+        },
     };
+    let Persist { ctx, defined, names, .. } = &mut persist;
     ctx.runtime_limits_mut().set_loop_iteration_limit(limits.loop_iterations);
     ctx.runtime_limits_mut().set_recursion_limit(limits.recursion);
-    let host_state = XHost::new(root, &event.target, doc);
-    let current = host_state.current;
     ctx.insert_data(RefCell::new(host_state));
     let mut out = XfaOutcome::default();
     let mut skipped: Vec<String> = Vec::new();
     let result = (|| -> JsResult<()> {
-        install(&mut ctx, event, doc, current, &format!("{prelude}\n{script}"))?;
+        // what the last script's names were is not what this one sees
+        for name in names.drain(..) {
+            ctx.global_object().delete_property_or_throw(JsString::from(name.as_str()), ctx)?;
+        }
+        let installed = install(ctx, event, doc, current, &format!("{prelude}\n{script}"))?;
+        // an object the set-up just replaced (a script object called `util`) is defined again below
+        defined.retain(|n, _| !installed.contains(n));
+        *names = installed;
         // Ready for the script: its time starts now, the set-up above not charged to it.
         started();
         if !prelude.is_empty() {
@@ -1771,8 +1838,22 @@ pub(crate) fn run_here_with(
             }
             // An object that does not load (E4X, say) is left out; the script fails only if it uses it.
             for object in prelude.split("/*__xfa_object_end__*/\n").filter(|o| !o.trim().is_empty()) {
-                if let Err(e) = ctx.eval(Source::from_bytes(object.as_bytes())) {
-                    let name = object.split('"').nth(1).unwrap_or("?");
+                let name = object.split('"').nth(1).unwrap_or("?").to_string();
+                let hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    object.hash(&mut h);
+                    h.finish()
+                };
+                let entry = match defined.get(&name) {
+                    Some((known, failure)) if *known == hash => failure.clone(),
+                    _ => {
+                        let failure = ctx.eval(Source::from_bytes(object.as_bytes())).err().map(|e| e.to_string());
+                        defined.insert(name.clone(), (hash, failure.clone()));
+                        failure
+                    }
+                };
+                if let Some(e) = entry {
                     skipped.push(format!("{name}: {e}"));
                 }
             }
@@ -1783,7 +1864,7 @@ pub(crate) fn run_here_with(
         let r = ctx.eval(Source::from_bytes(b"(function () { return eval(__xfa_src); }).call(__xfa_this)"))?;
         if !r.is_undefined() {
             // Best effort: a value that can't be made text (a symbol, say) is no failure.
-            out.result = Some(text(&r, &mut ctx).unwrap_or_default());
+            out.result = Some(text(&r, ctx).unwrap_or_default());
             if r.is_boolean() {
                 out.result_bool = Some(r.to_boolean());
             } else if r.is_null() {
@@ -1803,5 +1884,39 @@ pub(crate) fn run_here_with(
         out.console = h.console;
     }
     clip_result(&mut out);
+    // A script that froze the global object leaves nothing the next script can set up in: it gets an engine of its own.
+    if shared && persist.ctx.global_object().is_extensible(&mut persist.ctx).unwrap_or(false) {
+        PERSIST.with(|p| *p.borrow_mut() = Some(persist));
+    }
     out
+}
+
+/// The script objects a script runs with.
+pub(crate) struct ScriptCode<'a> {
+    /// The JavaScript that defines them.
+    pub(crate) prelude: &'a str,
+    /// The text of the ones that are data, by name.
+    pub(crate) texts: Vec<(String, String)>,
+    /// Whether the engine is the session's, kept for the scripts after this one.
+    pub(crate) shared: bool,
+}
+
+/// A script engine kept between the scripts of a session (the thread they run on holds it), with what is defined in it.
+struct Persist {
+    shape: u64,
+    ctx: Context,
+    /// The script objects defined in `ctx`: the hash of the code that defined each, and why it did not load, if it did not.
+    defined: HashMap<String, (u64, Option<String>)>,
+    /// The names the last script's set-up gave the global object.
+    names: Vec<String>,
+}
+
+std::thread_local! {
+    static PERSIST: RefCell<Option<Persist>> = const { RefCell::new(None) };
+}
+
+/// Let go of the engine kept for a session that is over. A thread must do it before it ends: the engine cannot be dropped by
+/// the thread's own cleanup.
+pub(crate) fn drop_shared() {
+    PERSIST.with(|p| *p.borrow_mut() = None);
 }
