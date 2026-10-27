@@ -32,7 +32,7 @@ use layout::Piece;
 pub(crate) use layout::WRAP_CALLS;
 #[cfg(test)]
 pub(crate) use layout::shaped_width;
-pub(crate) use layout::{first_unmarkable, mark_line_width, needs_fallback_face, prefer_hans};
+pub(crate) use layout::{first_unmarkable, is_hangul, mark_line_width, needs_fallback_face, prefer_hans};
 pub use layout::{PASTE_STEP, first_undrawable, lines, paste_place, paste_rect, text_rect, text_width};
 #[cfg(test)]
 use pdfcraft_fonts::ShapedCluster;
