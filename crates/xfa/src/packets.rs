@@ -44,6 +44,11 @@ fn utf16(bytes: &[u8], from: fn([u8; 2]) -> u16) -> Option<String> {
 /// anything else (invalid UTF-8, a legacy encoding, a broken surrogate), which can be read
 /// only approximately and so must not be written back.
 pub fn decode(bytes: &[u8]) -> Option<(String, Encoding)> {
+    // a bare `&` is escaped on the way in, so the packet is XML for every reader and what is written back is too
+    decode_exactly(bytes).map(|(text, encoding)| (repair_ampersands(text), encoding))
+}
+
+fn decode_exactly(bytes: &[u8]) -> Option<(String, Encoding)> {
     match bytes {
         [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes).map(|t| (t, Encoding::Utf16Le { bom: true })),
         [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes).map(|t| (t, Encoding::Utf16Be { bom: true })),

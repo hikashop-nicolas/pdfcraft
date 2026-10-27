@@ -938,6 +938,14 @@ fn field_flags(doc: &Document, dict: &Dict) -> Option<u32> {
 
 // ── writing ─────────────────────────────────────────────────────────────────────────────────
 
+/// Whether the AcroForm carries XFA packets.
+fn has_xfa(doc: &Document) -> bool {
+    doc.root()
+        .map(|r| doc.get(r))
+        .and_then(|c| c.as_dict().and_then(|c| c.get(b"AcroForm").map(|a| doc.resolve(a))))
+        .is_some_and(|a| a.as_dict().is_some_and(|a| a.contains(b"XFA")))
+}
+
 /// Fill the field `name`.
 pub fn set_value(doc: &mut Document, name: &str, value: &FieldValue) -> Result<(), FormError> {
     set_value_with(doc, name, value, &mut NoScripts)
@@ -1191,7 +1199,8 @@ fn write_value(doc: &mut Document, f: &Field, value: &FieldValue, scripts: &mut 
                 let opts: Vec<&str> = (0..f.widgets.len()).filter_map(|i| f.export_of(i)).collect();
                 return invalid(format!("{:?} has no option {c:?} (options: {})", f.name, opts.join(", ")));
             }
-            if choice.is_none() && f.has(flags::NO_TOGGLE_TO_OFF) && !f.value.is_empty() {
+            // An XFA form's own scripts empty its radio groups (a Clear Form button): its data drives them
+            if choice.is_none() && f.has(flags::NO_TOGGLE_TO_OFF) && !f.value.is_empty() && !has_xfa(doc) {
                 return invalid(format!("{:?} must keep one option selected", f.name));
             }
             set_states(doc, f, choice.as_deref())
