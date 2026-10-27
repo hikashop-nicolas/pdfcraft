@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashMap};
 use pdfcraft_cos::{Dict, Document, Object, PdfString};
 
 use crate::data::{DataNode, data_path, parse_datasets};
-use crate::model::{Access, Field, Node, Presence, Script, SomIndices, Template};
+use crate::model::{Access, Field, Node, Presence, Script, ScriptObject, SomIndices, Subform, Template};
 use crate::{Report, XfaError};
 
 /// Private key on the AcroForm: presence scripts set, by SOM path.
@@ -736,4 +736,204 @@ pub fn refresh_value(live: &mut FormNode, tpl: &Template, data: Option<&DataNode
 /// The data tree of a document's datasets packet.
 pub fn data_of(doc: &Document) -> Option<DataNode> {
     crate::read_packets(doc).ok().flatten().and_then(|p| parse_datasets(&p.xdp))
+}
+
+/// JavaScript that defines the script objects a script at `som` calls by name: `LOVUtils.check(x)` finds the
+/// `<variables><script name="LOVUtils">` of the subform the script sits in, or of one above it. Only the objects
+/// the script uses (and those they use) are defined, since every script runs in a fresh context. Empty when it uses none.
+pub fn script_objects_for(tpl: &Template, som: &str, script: &str) -> String {
+    // The subforms from the root down to the one holding the script, as the SOM names them.
+    let mut chain: Vec<&Subform> = vec![&tpl.root];
+    for part in som.split('.').skip(1) {
+        let name = part.split('[').next().unwrap_or(part);
+        let Some(last) = chain.last() else { break };
+        match subform_named(&last.children, name) {
+            Some(sf) => chain.push(sf),
+            None => break,
+        }
+    }
+    // Inner objects hide outer ones of the same name.
+    let mut objects: Vec<&ScriptObject> = Vec::new();
+    for sf in &chain {
+        for o in &sf.script_objects {
+            objects.retain(|x| x.name != o.name);
+            objects.push(o);
+        }
+    }
+    if objects.is_empty() {
+        return String::new();
+    }
+    let mentions = |text: &str, name: &str| -> bool {
+        text.match_indices(name).any(|(i, _)| {
+            let before = text[..i].chars().next_back();
+            let after = text[i + name.len()..].chars().next();
+            let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
+            !word(before) && !word(after)
+        })
+    };
+    let mut used: Vec<&ScriptObject> = Vec::new();
+    let mut texts = vec![script];
+    while let Some(text) = texts.pop() {
+        for o in &objects {
+            if !used.iter().any(|u| std::ptr::eq(*u, *o)) && mentions(text, &o.name) {
+                used.push(o);
+                texts.push(&o.text);
+            }
+        }
+    }
+    // Defined in the order they were declared.
+    used.sort_by_key(|u| objects.iter().position(|o| std::ptr::eq(*o, *u)));
+    let mut out = String::new();
+    for o in used {
+        let names = declared_names(&o.text);
+        let members: Vec<String> = names.iter().map(|n| format!("{n}: typeof {n} === 'undefined' ? undefined : {n}")).collect();
+        out.push_str(&format!("var {} = (function () {{\n{}\n;return {{ {} }};\n}})();\n", o.name, o.text, members.join(", ")));
+    }
+    out
+}
+
+/// The functions and variables a script declares at its top level or below (`function f`, `var v`, `let l`, `const c`), found by
+/// reading the code without its comments and strings.
+fn declared_names(text: &str) -> Vec<String> {
+    const RESERVED: &[&str] = &[
+        "function",
+        "var",
+        "let",
+        "const",
+        "if",
+        "else",
+        "for",
+        "while",
+        "do",
+        "switch",
+        "case",
+        "default",
+        "return",
+        "break",
+        "continue",
+        "new",
+        "delete",
+        "typeof",
+        "void",
+        "in",
+        "of",
+        "instanceof",
+        "this",
+        "null",
+        "true",
+        "false",
+        "try",
+        "catch",
+        "finally",
+        "throw",
+        "with",
+        "class",
+        "extends",
+        "super",
+        "yield",
+        "await",
+        "async",
+        "static",
+        "get",
+        "set",
+        "undefined",
+        "arguments",
+        "eval",
+    ];
+    let b = text.as_bytes();
+    let mut names: Vec<String> = Vec::new();
+    let mut i = 0;
+    let mut declaring = false;
+    while i < b.len() && names.len() < 256 {
+        let c = b[i];
+        match c {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i += 2;
+                while i < b.len() && !b[i..].starts_with(b"*/") {
+                    i += 1;
+                }
+                i += 2;
+            }
+            b'\'' | b'"' | b'`' => {
+                i += 1;
+                while i < b.len() && b[i] != c {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+                declaring = false;
+            }
+            c if c.is_ascii_alphabetic() || c == b'_' || c == b'$' => {
+                let start = i;
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$') {
+                    i += 1;
+                }
+                let word = &text[start..i];
+                // `a.function` or `x.var` is a property, not a declaration
+                let after_dot = text[..start].trim_end().ends_with('.');
+                if declaring && !RESERVED.contains(&word) && !after_dot {
+                    if !names.iter().any(|n| n == word) && word.len() < 64 {
+                        names.push(word.to_string());
+                    }
+                    declaring = false;
+                } else {
+                    declaring = !after_dot && matches!(word, "function" | "var" | "let" | "const");
+                }
+            }
+            c if c.is_ascii_whitespace() || c == b'*' => i += 1,
+            _ => {
+                declaring = false;
+                i += 1;
+            }
+        }
+    }
+    names
+}
+
+fn subform_named<'a>(nodes: &'a [Node], name: &str) -> Option<&'a Subform> {
+    for n in nodes {
+        match n {
+            Node::Subform(sf) if sf.common.name.as_deref() == Some(name) => return Some(sf),
+            Node::Subform(sf) if sf.common.name.is_none() => {
+                if let Some(found) = subform_named(&sf.children, name) {
+                    return Some(found);
+                }
+            }
+            Node::Area(a) => {
+                if let Some(found) = subform_named(&a.children, name) {
+                    return Some(found);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod script_object_tests {
+    use super::{declared_names, script_objects_for};
+
+    #[test]
+    fn a_script_gets_the_objects_it_uses_from_its_subforms() {
+        let (tpl, _) = crate::parse(&crate::fixtures::script_objects_template()).expect("parses");
+        let prelude = script_objects_for(&tpl, "form[0].page[0].total[0]", "this.rawValue = Names.greet('x');");
+        // Names is used directly, Calc by Names; Unused and the FormCalc object are not defined
+        assert!(prelude.contains("var Calc =") && prelude.contains("var Names ="), "{prelude}");
+        assert!(prelude.find("var Calc =") < prelude.find("var Names ="), "declared outer first");
+        assert!(!prelude.contains("var Unused") && !prelude.contains("Formcalc"), "{prelude}");
+        // from the root subform the inner object is out of reach, and a script that names none gets nothing
+        assert!(!script_objects_for(&tpl, "form[0]", "Names.greet()").contains("var Names"));
+        assert_eq!(script_objects_for(&tpl, "form[0].page[0].total[0]", "this.rawValue = 1;"), "");
+    }
+
+    #[test]
+    fn declared_names_are_read_without_comments_strings_or_properties() {
+        let text = "//==== function\n/* var hidden */ var counter = 0; function check(x) { return \"function fake\" + x.function; }\nfunction* gen() {}\nlet last;";
+        assert_eq!(declared_names(text), ["counter", "check", "gen", "last"]);
+    }
 }
