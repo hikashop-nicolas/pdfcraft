@@ -188,6 +188,10 @@ impl Document {
             .form
             .iter()
             .filter_map(|f| {
+                // an edit of a read-only field is refused, and one refused edit would undo the whole reset
+                if f.read_only() {
+                    return None;
+                }
                 let value = match f.kind {
                     K::Text => FieldValue::Text(String::new()),
                     K::CheckBox => FieldValue::Check(false),
@@ -238,6 +242,18 @@ mod tests {
     fn value_of(doc: &Document, name: &str) -> Option<String> {
         let fields: Vec<Value> = serde_json::from_str(&doc.fields_json(0).expect("fields")).expect("json");
         fields.iter().find(|f| f["name"] == name).and_then(|f| f["value"].as_str().map(str::to_string))
+    }
+
+    /// Clearing the form (an XFA form's reset) leaves a read-only field as it is rather than refusing the whole reset.
+    #[test]
+    fn clearing_the_form_skips_read_only_fields() {
+        let mut doc = open();
+        doc.set_field("Qty", r#"{"text":"4"}"#).expect("fills it");
+        doc.set_field("Total", r#"{"text":"20"}"#).expect("fills it");
+        doc.set_field_props("Total", r#"{"readOnly":true}"#).expect("locks it");
+        doc.clear_form().expect("clears");
+        assert_eq!(value_of(&doc, "Qty").as_deref().unwrap_or(""), "");
+        assert_eq!(value_of(&doc, "Total").as_deref(), Some("20"));
     }
 
     #[test]
