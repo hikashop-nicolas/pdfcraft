@@ -43,6 +43,12 @@ pub fn ui_chinese_fonts() -> Vec<&'static CraftFont> {
     CRAFT_FONTS.iter().filter(|f| f.covers("Hans")).collect()
 }
 
+/// The face for Korean text written into PDFs: the first `Hang` face. `None` when built without craft-fonts or when its
+/// revision has no Korean face.
+pub fn document_korean_font() -> Option<&'static CraftFont> {
+    CRAFT_FONTS.iter().find(|f| f.covers("Hang"))
+}
+
 /// The `Arab` craft-fonts faces for Arabic-script interface text (file names, document titles),
 /// in manifest order. Empty when built without craft-fonts or when it has no Arabic face.
 pub fn ui_arabic_fonts() -> Vec<&'static CraftFont> {

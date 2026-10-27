@@ -3714,7 +3714,7 @@ fn header_and_watermark_drawability_matches_what_applying_refuses() {
         ("Left\r\nRight", None),
         ("A\rB", Some('\r')),
         ("line one\nΕλληνικά", None),
-        ("안녕 <<1>>", Some('안')),
+        ("አሀ <<1>>", Some('አ')),
     ] {
         let hf = footer(text);
         assert_eq!(hf.first_undrawable(), refused, "{text:?}");
@@ -3737,16 +3737,16 @@ fn header_and_watermark_drawability_matches_what_applying_refuses() {
 fn page_text_the_standard_fonts_cant_draw_is_refused() {
     let mut doc = fixture();
     let before: Vec<Vec<String>> = (0..3).map(|p| streams(&reopen(&doc), p)).collect();
-    let text = AddedText { rect: [72.0, 600.0, 300.0, 700.0], text: "한국어 텍스트".into(), ..AddedText::default() };
+    let text = AddedText { rect: [72.0, 600.0, 300.0, 700.0], text: "አሀገ ደሠ".into(), ..AddedText::default() };
     let err = add_content(&mut doc, 0, &Content::Text(text)).unwrap_err().to_string();
-    assert!(err.contains("\"한\" (U+D55C)"), "{err}");
+    assert!(err.contains("\"አ\" (U+12A0)"), "{err}");
     let hf = HeaderFooter {
-        text: ["안녕".into(), String::new(), String::new(), String::new(), String::new(), String::new()],
+        text: ["አሀ".into(), String::new(), String::new(), String::new(), String::new(), String::new()],
         ..HeaderFooter::default()
     };
-    assert!(add_header_footer(&mut doc, &[0, 1], &hf, true, &cx()).unwrap_err().to_string().contains("U+C548"));
-    let wm = Watermark { text: "비밀".into(), ..Watermark::default() };
-    assert!(add_watermark(&mut doc, &[0], &wm, true).unwrap_err().to_string().contains("U+BE44"));
+    assert!(add_header_footer(&mut doc, &[0, 1], &hf, true, &cx()).unwrap_err().to_string().contains("U+12A0"));
+    let wm = Watermark { text: "ገደ".into(), ..Watermark::default() };
+    assert!(add_watermark(&mut doc, &[0], &wm, true).unwrap_err().to_string().contains("U+1308"));
     let after: Vec<Vec<String>> = (0..3).map(|p| streams(&reopen(&doc), p)).collect();
     assert_eq!(before, after, "a refused edit changes nothing");
     // Western European text, including what only WinAnsi (not Latin-1) has, still works.
@@ -3754,8 +3754,8 @@ fn page_text_the_standard_fonts_cant_draw_is_refused() {
     add_content(&mut doc, 0, &Content::Text(text.clone())).unwrap();
     // Retyping existing text is refused the same way, and the whole document is left as it was.
     let saved = write_incremental(&doc, &SaveOptions::default()).unwrap();
-    let retyped = AddedText { text: "Café 한".into(), ..text.clone() };
-    assert!(update_content(&mut doc, 0, 0, &Content::Text(retyped)).unwrap_err().to_string().contains("U+D55C"));
+    let retyped = AddedText { text: "Café አ".into(), ..text.clone() };
+    assert!(update_content(&mut doc, 0, 0, &Content::Text(retyped)).unwrap_err().to_string().contains("U+12A0"));
     assert_eq!(write_incremental(&doc, &SaveOptions::default()).unwrap(), saved, "a refused update changes nothing");
     // A carriage return is checked where it would be drawn: added text splits on LF only, so
     // CRLF would leave a `?`; headers and watermarks split CRLF into lines, but not a lone CR.
@@ -3772,13 +3772,13 @@ fn page_text_the_standard_fonts_cant_draw_is_refused() {
     let arabic = |text: &str| AddedText { rect: [72.0, 600.0, 300.0, 700.0], text: text.into(), ..AddedText::default() };
     // U+061C is in the Arabic block but is a direction mark that's dropped, not shaped: it never
     // makes text drawable, nor (with the face) undrawable.
-    assert!(add_content(&mut doc, 0, &Content::Text(arabic("\u{061C}한"))).is_err());
+    assert!(add_content(&mut doc, 0, &Content::Text(arabic("\u{061C}አ"))).is_err());
     if pdfcraft_fonts::arabic_has('م') {
         add_content(&mut doc, 0, &Content::Text(arabic("مرحبا Hello"))).unwrap();
         add_content(&mut doc, 0, &Content::Text(arabic("\u{061C}Hello"))).unwrap();
-        for text in ["مرحبا 한", "\u{061C}한"] {
+        for text in ["مرحبا አ", "\u{061C}አ"] {
             let err = add_content(&mut doc, 0, &Content::Text(arabic(text))).unwrap_err().to_string();
-            assert!(err.contains("U+D55C"), "{text:?}: {err}");
+            assert!(err.contains("U+12A0"), "{text:?}: {err}");
         }
     } else {
         // #403's own refusal says what's missing; the Add-text editor still keeps the draft.
@@ -4107,7 +4107,7 @@ fn added_thai_text_wraps_clusters_and_survives_reopen() {
     assert_eq!(super::added::lines(&narrow), ["กิ่", "กิ่", "กิ่"]);
     update_content(&mut doc, 0, 0, &Content::Text(AddedText { text: "แก้ไข น้ำ".into(), ..t.clone() })).unwrap();
     assert!(!own(&doc, 0).is_empty());
-    let bad = Content::Text(AddedText { text: "ไทย 안".into(), ..t });
+    let bad = Content::Text(AddedText { text: "ไทย አ".into(), ..t });
     let before = list_added(&doc);
     assert!(update_content(&mut doc, 0, 0, &bad).is_err());
     assert_eq!(list_added(&doc), before);
@@ -4144,9 +4144,12 @@ fn added_cyrillic_greek_and_polish_text_uses_the_bundled_face() {
     let lines = super::added::lines(&narrow);
     assert!(lines.len() >= 2 && lines.iter().all(|l| !l.starts_with(' ') && !l.ends_with(' ')), "{lines:?}");
     assert_eq!(lines.join(" "), "Привет мир Привет");
+    // Korean has its own face where the build carries it, and is refused where it does not
+    let korean = AddedText { text: "안녕".into(), ..t.clone() };
+    assert_eq!(first_undrawable(&korean), if pdfcraft_fonts::hang_has('안') { None } else { Some('안') });
     // what no face has is still refused
-    let korean = AddedText { text: "안녕".into(), ..t };
-    assert_eq!(first_undrawable(&korean), Some('안'));
+    let runic = AddedText { text: "አሀ".into(), ..t };
+    assert_eq!(first_undrawable(&runic), Some('አ'));
 }
 
 #[test]
@@ -4175,11 +4178,42 @@ fn headers_footers_and_watermarks_draw_cyrillic_with_the_bundled_face() {
     assert!(below.contains("(") && below.contains("Tj"), "the Latin runs keep their standard font");
     // what no face has is refused, before anything is drawn
     let mut bad = HeaderFooter::default();
-    bad.text[0] = "안녕".into();
-    assert_eq!(bad.first_undrawable(), Some('안'));
+    bad.text[0] = "አሀ".into();
+    assert_eq!(bad.first_undrawable(), Some('አ'));
     let mut fresh = fixture();
     assert!(add_header_footer(&mut fresh, &[0], &bad, false, &cx()).is_err());
     assert!(!fresh.is_modified());
+}
+
+#[test]
+fn added_korean_uses_the_korean_face_and_wraps_at_spaces() {
+    let mut doc = fixture();
+    let korean =
+        AddedText { rect: [20.0, 100.0, 200.0, 300.0], text: "안녕하세요 세계 문서 2026".into(), size: 16.0, ..AddedText::default() };
+    if !pdfcraft_fonts::hang_has('안') {
+        eprintln!("skipping the Korean checks: built without a craft-fonts Hang face (set CRAFT_FONTS_DIR to an input with one)");
+        assert_eq!(first_undrawable(&korean), Some('안'));
+        return;
+    }
+    assert_eq!(first_undrawable(&korean), None);
+    add_content(&mut doc, 0, &Content::Text(korean.clone())).unwrap();
+    let reopened = reopen(&doc);
+    let p = &pdfcraft_model::pages(&reopened)[0];
+    let res = reopened.resolve(p.dict.get(b"Resources").unwrap());
+    let fonts = reopened.resolve(res.as_dict().unwrap().get(b"Font").unwrap()).as_dict().unwrap().clone();
+    let mut mapped = String::new();
+    for (_, v) in fonts.iter().filter(|(k, _)| k.starts_with(b"PCAr")) {
+        let f = reopened.resolve(v).as_dict().unwrap().clone();
+        mapped += &String::from_utf8_lossy(&stream_bytes(&reopened, f.get(b"ToUnicode").unwrap()).unwrap());
+    }
+    for syllable in ["C548", "B155", "D558"] {
+        assert!(mapped.contains(&format!("<{syllable}>")), "{syllable} in {mapped}");
+    }
+    // a narrow box wraps at the spaces, as Korean is written, not between syllables
+    let narrow = AddedText { rect: [0.0, 0.0, 70.0, 200.0], ..korean };
+    let lines = super::added::lines(&narrow);
+    assert!(lines.len() >= 2 && lines.iter().all(|l| !l.starts_with(' ') && !l.ends_with(' ')), "{lines:?}");
+    assert_eq!(lines.join(" "), "안녕하세요 세계 문서 2026");
 }
 
 #[test]
