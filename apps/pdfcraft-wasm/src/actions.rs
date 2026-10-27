@@ -120,6 +120,10 @@ impl Document {
     /// engine, the rest comes back as requests for the page (a link, a page to go to, a menu item, a form to submit).
     pub fn run_action(&mut self, action: &str, target: Option<&str>) -> Result<String, String> {
         let v: Value = serde_json::from_str(action).map_err(|e| e.to_string())?;
+        // `{"kind": "click"}`: the button's own click, which an XFA form keeps in its template (the PDF has no action for it)
+        if v["kind"] == "click" {
+            return self.run_javascript("", Some(target.ok_or("a click needs a field")?));
+        }
         let script = match parse_action(&v)? {
             FieldAction::JavaScript(s) => s,
             FieldAction::Reset(f) => format!("this.resetForm({});", serde_json::to_string(&f).map_err(|e| e.to_string())?),
