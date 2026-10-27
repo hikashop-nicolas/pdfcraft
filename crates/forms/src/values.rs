@@ -406,7 +406,8 @@ fn write_value_impl(doc: &mut Document, f: &Field, value: &FieldValue, scripts: 
                 let opts: Vec<&str> = (0..f.widgets.len()).filter_map(|i| f.export_of(i)).collect();
                 return invalid(format!("{:?} has no option {c:?} (options: {})", f.name, opts.join(", ")));
             }
-            if choice.is_none() && f.has(flags::NO_TOGGLE_TO_OFF) && !f.value.is_empty() {
+            // An XFA form's own scripts empty its radio groups (a Clear Form button): its data drives them
+            if choice.is_none() && f.has(flags::NO_TOGGLE_TO_OFF) && !f.value.is_empty() && !has_xfa(doc) {
                 return invalid(format!("{:?} must keep one option selected", f.name));
             }
             if radio_change_blocked(f, choice.as_deref(), None) {
@@ -1049,4 +1050,12 @@ fn twin_positions(picked: &[usize], source: &[(String, String)], twin: &[(String
     let mut out = crate::option_positions_in(picked, source, twin)?;
     out.sort_unstable();
     Some(out)
+}
+
+/// Whether the AcroForm carries XFA packets.
+fn has_xfa(doc: &Document) -> bool {
+    doc.root()
+        .map(|r| doc.get(r))
+        .and_then(|c| c.as_dict().and_then(|c| c.get(b"AcroForm").map(|a| doc.resolve(a))))
+        .is_some_and(|a| a.as_dict().is_some_and(|a| a.contains(b"XFA")))
 }
