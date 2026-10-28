@@ -17,6 +17,7 @@ mod cjk_scripts;
 fn main() {
     println!("cargo::rerun-if-env-changed=CRAFT_FONTS_DIR");
     println!("cargo::rerun-if-env-changed=CRAFT_FONTS_REQUIRED");
+    println!("cargo::rerun-if-env-changed=CRAFT_FONTS_EXTERNAL_CJK");
     let mut src = String::from("pub static CRAFT_FONTS: &[CraftFont] = &[\n");
     let required = std::env::var_os("CRAFT_FONTS_REQUIRED").is_some();
     if let Some(dir) = std::env::var_os("CRAFT_FONTS_DIR").map(PathBuf::from) {
@@ -116,7 +117,9 @@ fn manifest(dir: &std::path::Path, manifest: &std::path::Path, wasm: bool, stric
             || hebrew
             || scripts.split(',').any(|s| s.trim() == "Thai")
             || devanagari;
-        if wasm && !web_face {
+        // A host that loads the big CJK faces itself (`add_craft_font`) builds without them: they are the module's largest data.
+        let external = wasm && std::env::var_os("CRAFT_FONTS_EXTERNAL_CJK").is_some() && ((*family == "BIZ UDPGothic" && *style == "Regular") || small_hans || small_hang);
+        if wasm && (!web_face || external) {
             continue;
         }
         has_hans |= cjk_scripts::has_script_tag(scripts, "Hans");

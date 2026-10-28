@@ -181,7 +181,7 @@ pub fn substitute(req: &Request<'_>) -> Substitution {
     }
     if let Some(script) = req.ordering.and_then(script_for) {
         // A script we hold a face for; otherwise there is no honest substitute to offer.
-        return match crate::CRAFT_FONTS.iter().find(|f| f.covers(script)) {
+        return match crate::craft_fonts().into_iter().find(|f| f.covers(script)) {
             Some(f) => at(Face::Craft(f), Why::ScriptFace),
             None => at(Face::None, Why::NoFaceForScript),
         };

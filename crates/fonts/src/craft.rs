@@ -15,6 +15,29 @@ pub struct CraftFont {
 
 include!(concat!(env!("OUT_DIR"), "/craft_fonts.rs"));
 
+static ADDED: std::sync::RwLock<Vec<&'static CraftFont>> = std::sync::RwLock::new(Vec::new());
+
+/// Adds a face a host loaded at run time (the wasm build leaves its biggest CJK faces out of the module). Adding the same
+/// family and style again gives back the face already added. The bytes stay for the life of the program.
+pub fn add_craft_font(family: &str, style: &str, scripts: &[&str], bytes: Vec<u8>) -> &'static CraftFont {
+    let mut added = ADDED.write().unwrap_or_else(|e| e.into_inner());
+    if let Some(f) = added.iter().find(|f| f.family == family && f.style == style) {
+        return f;
+    }
+    let leak = |s: &str| -> &'static str { Box::leak(s.to_string().into_boxed_str()) };
+    let scripts: &'static [&'static str] = Box::leak(scripts.iter().map(|s| leak(s)).collect::<Vec<_>>().into_boxed_slice());
+    let font: &'static CraftFont = Box::leak(Box::new(CraftFont { family: leak(family), style: leak(style), scripts, bytes: Box::leak(bytes.into_boxed_slice()) }));
+    added.push(font);
+    font
+}
+
+/// Every craft face: the ones built in, then the ones added at run time.
+pub fn craft_fonts() -> Vec<&'static CraftFont> {
+    let mut all: Vec<&'static CraftFont> = CRAFT_FONTS.iter().collect();
+    all.extend(ADDED.read().unwrap_or_else(|e| e.into_inner()).iter().copied());
+    all
+}
+
 impl CraftFont {
     /// Whether the font is meant for `script` (ISO 15924, e.g. `"Jpan"`).
     pub fn covers(&self, script: &str) -> bool {
@@ -30,7 +53,7 @@ impl CraftFont {
 /// The `Jpan` craft-fonts faces in the order the interface prefers them: BIZ UDPGothic (a UI
 /// face) first, then the rest in manifest order. Empty without craft-fonts.
 pub fn ui_japanese_fonts() -> Vec<&'static CraftFont> {
-    let mut fonts: Vec<&CraftFont> = CRAFT_FONTS.iter().filter(|f| f.covers("Jpan")).collect();
+    let mut fonts: Vec<&CraftFont> = craft_fonts().into_iter().filter(|f| f.covers("Jpan")).collect();
     // Stable: manifest order within each group.
     fonts.sort_by_key(|f| f.family != "BIZ UDPGothic");
     fonts
@@ -40,19 +63,19 @@ pub fn ui_japanese_fonts() -> Vec<&'static CraftFont> {
 /// Empty when built without craft-fonts (Chinese text then shows the font system's
 /// replacement glyph, the same degraded mode as Japanese without craft-fonts).
 pub fn ui_chinese_fonts() -> Vec<&'static CraftFont> {
-    CRAFT_FONTS.iter().filter(|f| f.covers("Hans")).collect()
+    craft_fonts().into_iter().filter(|f| f.covers("Hans")).collect()
 }
 
 /// The face for Korean text written into PDFs: the first `Hang` face. `None` when built without craft-fonts or when its
 /// revision has no Korean face.
 pub fn document_korean_font() -> Option<&'static CraftFont> {
-    CRAFT_FONTS.iter().find(|f| f.covers("Hang"))
+    craft_fonts().into_iter().find(|f| f.covers("Hang"))
 }
 
 /// The `Arab` craft-fonts faces for Arabic-script interface text (file names, document titles),
 /// in manifest order. Empty when built without craft-fonts or when it has no Arabic face.
 pub fn ui_arabic_fonts() -> Vec<&'static CraftFont> {
-    arabic(CRAFT_FONTS.iter())
+    arabic(craft_fonts().into_iter())
 }
 
 /// The face for Arabic text written into PDFs: the first `Arab` face. `None` when built without
@@ -69,12 +92,12 @@ fn arabic<'a>(faces: impl IntoIterator<Item = &'a CraftFont>) -> Vec<&'a CraftFo
 /// document titles), in manifest order. Empty when built without craft-fonts or when it has no
 /// Telugu face.
 pub fn ui_telugu_fonts() -> Vec<&'static CraftFont> {
-    CRAFT_FONTS.iter().filter(|f| f.covers("Telu")).collect()
+    craft_fonts().into_iter().filter(|f| f.covers("Telu")).collect()
 }
 
 /// Thai faces shared by the interface and PDF text writer.
 pub fn ui_thai_fonts() -> Vec<&'static CraftFont> {
-    CRAFT_FONTS.iter().filter(|f| f.covers("Thai")).collect()
+    craft_fonts().into_iter().filter(|f| f.covers("Thai")).collect()
 }
 
 pub fn document_thai_font() -> Option<&'static CraftFont> {
@@ -86,7 +109,7 @@ pub fn document_thai_font() -> Option<&'static CraftFont> {
 /// has no Devanagari face; a desktop build then falls back to one font already installed on the
 /// machine (`SYSTEM_DEVANAGARI_FALLBACK`), and the web build shows replacement boxes.
 pub fn ui_devanagari_fonts() -> Vec<&'static CraftFont> {
-    CRAFT_FONTS.iter().filter(|f| f.covers("Deva")).collect()
+    craft_fonts().into_iter().filter(|f| f.covers("Deva")).collect()
 }
 
 /// The face for Devanagari text written into PDFs: the first `Deva` face. `None` when built
@@ -99,17 +122,17 @@ pub fn document_devanagari_font() -> Option<&'static CraftFont> {
 /// being edited), in manifest order. Empty when built without craft-fonts or when it has no
 /// Hebrew face.
 pub fn ui_hebrew_fonts() -> Vec<&'static CraftFont> {
-    CRAFT_FONTS.iter().filter(|f| f.covers("Hebr")).collect()
+    craft_fonts().into_iter().filter(|f| f.covers("Hebr")).collect()
 }
 
 /// The face for Hebrew text written into PDFs: the `Hebr` face of the asked weight, else its
 /// Regular, else any `Hebr` face. `None` without craft-fonts or without a Hebrew face.
 pub fn document_hebrew_font(bold: bool) -> Option<&'static CraftFont> {
-    hebrew_face(CRAFT_FONTS, bold)
+    hebrew_face(craft_fonts(), bold)
 }
 
-fn hebrew_face(faces: &[CraftFont], bold: bool) -> Option<&CraftFont> {
-    let hebr = || faces.iter().filter(|f| f.covers("Hebr"));
+fn hebrew_face<'a>(faces: impl IntoIterator<Item = &'a CraftFont> + Clone, bold: bool) -> Option<&'a CraftFont> {
+    let hebr = || faces.clone().into_iter().filter(|f| f.covers("Hebr"));
     let style = if bold { "Bold" } else { "Regular" };
     hebr().find(|f| f.style == style).or_else(|| hebr().find(|f| f.style == "Regular")).or_else(|| hebr().next())
 }
@@ -123,7 +146,7 @@ fn hebrew_face(faces: &[CraftFont], bold: bool) -> Option<&CraftFont> {
 /// metrics then sink it below the line. Preferring the UI language's face keeps one line in
 /// one face with one baseline.
 pub fn ui_cjk_fonts(prefer_hans: bool) -> Vec<&'static CraftFont> {
-    order_cjk(CRAFT_FONTS.iter(), prefer_hans)
+    order_cjk(craft_fonts().into_iter(), prefer_hans)
 }
 
 fn order_cjk<'a>(faces: impl IntoIterator<Item = &'a CraftFont>, prefer_hans: bool) -> Vec<&'a CraftFont> {
@@ -139,7 +162,7 @@ fn order_cjk<'a>(faces: impl IntoIterator<Item = &'a CraftFont>, prefer_hans: bo
 /// The face for Japanese text written into PDFs (serif document text): Shippori Mincho, then
 /// BIZ UDMincho, then any other regular `Jpan` face. `None` without craft-fonts.
 pub fn document_japanese_font() -> Option<&'static CraftFont> {
-    document_face(CRAFT_FONTS, true, false)
+    document_face(craft_fonts(), true, false)
 }
 
 /// A real Japanese document face matching serif/sans and weight where available.
@@ -147,7 +170,7 @@ pub fn document_japanese_font() -> Option<&'static CraftFont> {
 /// serif text keeps the document Mincho preference. No synthetic weight or slant is applied.
 /// `None` without craft-fonts. The small web input currently has only Gothic Regular.
 pub fn document_japanese_font_for_style(serif: bool, bold: bool) -> Option<&'static CraftFont> {
-    document_face(CRAFT_FONTS, serif, bold)
+    document_face(craft_fonts(), serif, bold)
 }
 
 /// Every `Jpan` face that can stand in for the document text, the best match for the style first
@@ -155,7 +178,7 @@ pub fn document_japanese_font_for_style(serif: bool, bold: bool) -> Option<&'sta
 /// every glyph (their coverage of e.g. Cyrillic differs), so a caller can move on to the next one.
 /// Empty without craft-fonts.
 pub fn document_japanese_fonts_for_style(serif: bool, bold: bool) -> Vec<&'static CraftFont> {
-    document_faces(CRAFT_FONTS, serif, bold)
+    document_faces(craft_fonts(), serif, bold)
 }
 
 /// The scripts the bundled Inter faces are for.
@@ -176,12 +199,12 @@ pub fn document_latin_fonts(bold: bool) -> Vec<&'static CraftFont> {
     vec![if bold { &INTER_SEMIBOLD_FACE } else { &INTER_REGULAR_FACE }]
 }
 
-fn document_face(faces: &[CraftFont], serif: bool, bold: bool) -> Option<&CraftFont> {
+fn document_face<'a>(faces: impl IntoIterator<Item = &'a CraftFont> + Clone, serif: bool, bold: bool) -> Option<&'a CraftFont> {
     document_faces(faces, serif, bold).into_iter().next()
 }
 
-fn document_faces(faces: &[CraftFont], serif: bool, bold: bool) -> Vec<&CraftFont> {
-    let jpan = || faces.iter().filter(|f| f.covers("Jpan"));
+fn document_faces<'a>(faces: impl IntoIterator<Item = &'a CraftFont> + Clone, serif: bool, bold: bool) -> Vec<&'a CraftFont> {
+    let jpan = || faces.clone().into_iter().filter(|f| f.covers("Jpan"));
     let mut preferred = Vec::new();
     if !serif {
         let style = if bold { "Bold" } else { "Regular" };

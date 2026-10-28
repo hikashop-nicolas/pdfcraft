@@ -4540,6 +4540,7 @@ dependencies = [
  "image",
  "js-sys",
  "pdfcraft-engine",
+ "pdfcraft-fonts",
  "pdfcraft-render",
  "serde_json",
  "wasm-bindgen",

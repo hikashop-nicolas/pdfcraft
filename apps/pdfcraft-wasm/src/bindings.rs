@@ -23,6 +23,14 @@ fn rect(v: &[f64]) -> Result<[f64; 4], JsError> {
     }
 }
 
+/// Gives the engine a font face the build left out (Japanese, Simplified Chinese, Korean), as the font file's bytes.
+/// `scripts` lists its ISO 15924 scripts, comma separated (`Jpan,Latn`). Call it before opening documents.
+#[wasm_bindgen]
+pub fn add_font(bytes: Vec<u8>, family: &str, style: &str, scripts: &str) {
+    let scripts: Vec<&str> = scripts.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    pdfcraft_fonts::add_craft_font(family, style, &scripts, bytes);
+}
+
 /// A rendered page or tile.
 #[wasm_bindgen]
 pub struct Rendered {
