@@ -184,6 +184,7 @@ impl Document {
             opacity: number(&v, "opacity", 1.0, 0.0..=1.0)?,
             source: None,
             scale: number(&v, "scale", 1.0, 0.05..=2.0)?,
+            replace_backdrop: true,
         };
         let file = picture.map(|(name, bytes)| MarkFile { name, bytes: Arc::new(bytes), page: 0 });
         self.apply(Edit::AddBackground { pages, settings, replace: true, file })

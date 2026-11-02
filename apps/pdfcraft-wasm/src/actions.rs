@@ -2,11 +2,17 @@
 //! A script runs in the engine's sandbox; what it asks of the page (print, open a link, go to a
 //! page) comes back as requests for the page to carry out.
 
-use pdfcraft_engine::js::{JsOutput, Outcome, Request};
+use pdfcraft_engine::js::{JsOutput, Message, Outcome, Request};
+
 use pdfcraft_engine::{Edit, FieldAction, FieldTrigger as Trigger};
 use serde_json::{Value, json};
 
 use crate::core::Document;
+
+/// The text of each message box, which is what the facade reports.
+fn alert_texts(alerts: &[Message]) -> Vec<String> {
+    alerts.iter().map(|m| m.text.clone()).collect()
+}
 
 fn list(v: &Value, key: &str) -> Vec<String> {
     v.get(key).and_then(Value::as_array).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).take(500).collect()).unwrap_or_default()
@@ -60,7 +66,7 @@ fn output_json(alerts: &[String], console: &[String], requests: &[Request], erro
 
 fn outcome_json(o: &Outcome) -> Value {
     let errors: Vec<String> = o.error.iter().chain(o.doc_errors.iter()).cloned().collect();
-    let mut out = output_json(&o.alerts, &o.console, &o.requests, &errors);
+    let mut out = output_json(&alert_texts(&o.alerts), &o.console, &o.requests, &errors);
     out["result"] = json!(o.result);
     out
 }
@@ -211,7 +217,7 @@ impl Document {
     /// What field scripts printed or asked for during edits since the last call (alerts, requests, errors).
     pub fn take_js_output(&mut self) -> String {
         let o: JsOutput = self.session.take_js_output(self.id);
-        output_json(&o.alerts, &o.console, &o.requests, &o.errors).to_string()
+        output_json(&alert_texts(&o.alerts), &o.console, &o.requests, &o.errors).to_string()
     }
 
     pub fn set_javascript(&mut self, on: bool) {

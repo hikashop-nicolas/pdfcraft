@@ -54,7 +54,7 @@ impl Document {
 
     /// Deletes one widget of a field (a radio group's button); a field with a single widget goes whole.
     pub fn delete_field_widget(&mut self, name: &str, widget: usize) -> Result<(), String> {
-        self.apply(Edit::DeleteFieldWidget { name: name.to_string(), widget })
+        self.apply(Edit::DeleteWidget { name: name.to_string(), widget })
     }
 
     /// Changes a field: `{"name"?, "tooltip"?, "required"?, "readOnly"?, "options"?, "fontSize"?, "caption"?, "box"?}`; the box

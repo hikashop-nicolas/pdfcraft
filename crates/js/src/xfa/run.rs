@@ -1,0 +1,265 @@
+use super::globals::install;
+use super::host::{Shared, XHost};
+use super::model::{XfaBox, XfaDoc, XfaEvent, XfaNode, XfaOutcome, clip_result};
+use super::{Attribute, Context, HashMap, JsResult, JsString, Limits, RefCell, Source, js_string, refuse, s, text};
+
+/// Run `script` for `event` on the form `root` (the root subform), from node `event.target`.
+pub fn run_xfa(script: &str, event: &XfaEvent, doc: &XfaDoc, root: &XfaNode, limits: Limits) -> XfaOutcome {
+    let failed = |why: String| XfaOutcome { error: Some(why), ..Default::default() };
+    if let Some(why) = refuse(script) {
+        return failed(why);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        std::thread::scope(|scope| {
+            let spawned = std::thread::Builder::new()
+                .name("pdfcraft-xfa-js".into())
+                .stack_size(crate::SCRIPT_STACK)
+                .spawn_scoped(scope, || run_here(script, event, doc, root.clone(), limits, &|| {}));
+            match spawned {
+                Ok(thread) => thread.join().unwrap_or_else(|_| failed("the script stopped with an internal error".into())),
+                Err(e) => failed(format!("the script engine could not start: {e}")),
+            }
+        })
+    }
+    #[cfg(target_arch = "wasm32")]
+    run_here(script, event, doc, root.clone(), limits, &|| {})
+}
+
+/// [`run_xfa`] with a time limit: a script still running `timeout` after the engine is ready
+/// (loops inside nested function calls can run for hours within the engine's per-frame loop
+/// limit) is left on its thread, which ends when the engine's own limits stop it, and an
+/// outcome with `abandoned` set comes back at once. In the browser build there are no
+/// threads: the script runs to its limits.
+pub fn run_xfa_within(script: &str, event: &XfaEvent, doc: &XfaDoc, root: XfaNode, limits: Limits, timeout: std::time::Duration) -> XfaOutcome {
+    if let Some(why) = refuse(script) {
+        return XfaOutcome { error: Some(why), ..Default::default() };
+    }
+    let (script, event, doc) = (script.to_string(), event.clone(), doc.clone());
+    run_within("pdfcraft-xfa-js", timeout, move |started| run_here(&script, &event, &doc, root, limits, started))
+}
+
+/// Longest the script engine may take to be ready for a script (its thread and context, and
+/// for the first script in a process the engine's own set-up) before the script is abandoned.
+/// It doesn't count against the script's time: on a busy machine the start alone can take
+/// longer than the tightest limit, and abandoning a script turns the form's scripts off.
+pub(crate) const ENGINE_START_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Run `script` on its own thread (with the script stack) and wait at most `timeout` for its
+/// outcome, counted from when it calls `started` (once the engine is ready); past that the
+/// thread is abandoned and the outcome says so. On wasm there are no threads: the script runs
+/// here.
+pub(crate) fn run_within(name: &str, timeout: std::time::Duration, script: impl FnOnce(&dyn Fn()) -> XfaOutcome + Send + 'static) -> XfaOutcome {
+    run_within_limits(name, ENGINE_START_LIMIT, timeout, script)
+}
+
+/// [`run_within`] with the engine's start-up limit given.
+pub(crate) fn run_within_limits(
+    name: &str,
+    start_limit: std::time::Duration,
+    timeout: std::time::Duration,
+    script: impl FnOnce(&dyn Fn()) -> XfaOutcome + Send + 'static,
+) -> XfaOutcome {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::sync::mpsc::RecvTimeoutError;
+        use std::time::Instant;
+        enum Step {
+            Started,
+            Done(XfaOutcome),
+        }
+        let failed = |why: String| XfaOutcome { error: Some(why), ..Default::default() };
+        let abandoned = |why: String| XfaOutcome { error: Some(why), abandoned: true, ..Default::default() };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name(name.into()).stack_size(crate::SCRIPT_STACK).spawn(move || {
+            // The receiver is gone when the caller stopped waiting: nothing to report then.
+            let started = tx.clone();
+            let outcome = script(&move || {
+                let _ = started.send(Step::Started);
+            });
+            let _ = tx.send(Step::Done(outcome));
+        });
+        if let Err(e) = spawned {
+            return failed(format!("the script engine could not start: {e}"));
+        }
+        // Wait for the engine within its start-up limit, then for the script within its own.
+        let (mut running, mut limit) = (false, start_limit);
+        let mut deadline = Instant::now().checked_add(limit);
+        loop {
+            let left = deadline.map_or(limit, |d| d.saturating_duration_since(Instant::now()));
+            match rx.recv_timeout(left) {
+                Ok(Step::Done(o)) => return o,
+                Ok(Step::Started) => {
+                    // A second call changes nothing: the script's time has already begun.
+                    if !running {
+                        (running, limit) = (true, timeout);
+                        deadline = Instant::now().checked_add(limit);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) if running => {
+                    return abandoned(format!("the script ran longer than {:.1} s and was abandoned", timeout.as_secs_f64()));
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    return abandoned(format!("the script engine took longer than {:.0} s to start", start_limit.as_secs_f64()));
+                }
+                Err(RecvTimeoutError::Disconnected) => return failed("the script stopped with an internal error".into()),
+            }
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (name, start_limit, timeout);
+        script(&|| {})
+    }
+}
+
+/// The first script in a process sets the engine up (its built-ins, parser and compiler come
+/// into use): a trivial script takes that on, so a form's script is never timed with it.
+pub(crate) fn warm_up() {
+    static WARM: std::sync::Once = std::sync::Once::new();
+    // `call_once_force`: a poisoned `Once` (a panic while warming up) only means warming up again.
+    WARM.call_once_force(|_| {
+        let mut ctx = Context::default();
+        let _ = ctx.eval(Source::from_bytes(b"(function () { return eval('0'); }).call({})"));
+    });
+}
+
+/// `started` is called once the engine is ready: a time limit on the script runs from then.
+fn run_here(script: &str, event: &XfaEvent, doc: &XfaDoc, root: XfaNode, limits: Limits, started: &dyn Fn()) -> XfaOutcome {
+    run_here_with(script, ScriptCode { prelude: "", texts: Vec::new(), layout: Default::default(), shared: false }, event, doc, root, limits, started)
+}
+
+/// [`run_here`] with `prelude`, the form's script objects, defined first. They are part of the form, so they are not held
+/// to the size a script may have (their own bound is the caller's), only to its nesting.
+pub(crate) fn run_here_with(
+    script: &str,
+    objects: ScriptCode<'_>,
+    event: &XfaEvent,
+    doc: &XfaDoc,
+    root: XfaNode,
+    limits: Limits,
+    started: &dyn Fn(),
+) -> XfaOutcome {
+    let ScriptCode { prelude, texts, layout, shared } = objects;
+    warm_up();
+    let mut host_state = XHost::new(root, &event.target, doc);
+    host_state.texts = texts;
+    host_state.boxes = layout;
+    let current = host_state.current;
+    // The engine a session's earlier script left is used again while the form has the same structure: the script objects
+    // it defined (read once, with the state they hold) are there for this script.
+    let kept = if shared { PERSIST.with(|p| p.borrow_mut().take()).filter(|p| p.shape == host_state.shape) } else { None };
+    let mut persist = match kept {
+        Some(p) => p,
+        None => match Context::builder().host_hooks(std::rc::Rc::new(crate::CheckedCodeFromStrings)).build() {
+            Ok(ctx) => Persist { shape: host_state.shape, ctx, defined: HashMap::new(), names: Vec::new() },
+            Err(e) => return XfaOutcome { error: Some(format!("the script engine could not start: {e}")), ..Default::default() },
+        },
+    };
+    let Persist { ctx, defined, names, .. } = &mut persist;
+    ctx.runtime_limits_mut().set_loop_iteration_limit(limits.loop_iterations);
+    ctx.runtime_limits_mut().set_recursion_limit(limits.recursion);
+    ctx.insert_data(RefCell::new(host_state));
+    let mut out = XfaOutcome::default();
+    let mut skipped: Vec<String> = Vec::new();
+    let result = (|| -> JsResult<()> {
+        // what the last script's names were is not what this one sees
+        for name in names.drain(..) {
+            ctx.global_object().delete_property_or_throw(JsString::from(name.as_str()), ctx)?;
+        }
+        let installed = install(ctx, event, doc, current, &format!("{prelude}\n{script}"))?;
+        // an object the set-up just replaced (a script object called `util`) is defined again below
+        defined.retain(|n, _| !installed.contains(n));
+        *names = installed;
+        // Ready for the script: its time starts now, the set-up above not charged to it.
+        started();
+        if !prelude.is_empty() {
+            if let Some(why) = crate::refuse_nesting(prelude) {
+                return Err(boa_engine::JsNativeError::range().with_message(why).into());
+            }
+            // An object that does not load (E4X, say) is left out; the script fails only if it uses it.
+            for object in prelude.split("/*__xfa_object_end__*/\n").filter(|o| !o.trim().is_empty()) {
+                let name = object.split('"').nth(1).unwrap_or("?").to_string();
+                let hash = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    object.hash(&mut h);
+                    h.finish()
+                };
+                let entry = match defined.get(&name) {
+                    Some((known, failure)) if *known == hash => failure.clone(),
+                    _ => {
+                        let failure = ctx.eval(Source::from_bytes(object.as_bytes())).err().map(|e| e.to_string());
+                        defined.insert(name.clone(), (hash, failure.clone()));
+                        failure
+                    }
+                };
+                if let Some(e) = entry {
+                    skipped.push(format!("{name}: {e}"));
+                }
+            }
+        }
+        ctx.register_global_property(js_string!("__xfa_src"), s(script), Attribute::CONFIGURABLE)?;
+        // Direct eval inside a function called on the node: `this` is the node and the
+        // completion value is the script's last expression (what a calculate script yields).
+        let r = ctx.eval(Source::from_bytes(b"(function () { return eval(__xfa_src); }).call(__xfa_this)"))?;
+        if !r.is_undefined() {
+            // Best effort: a value that can't be made text (a symbol, say) is no failure.
+            out.result = Some(text(&r, ctx).unwrap_or_default());
+            if r.is_boolean() {
+                out.result_bool = Some(r.to_boolean());
+            } else if r.is_null() {
+                out.result = Some(String::new());
+            }
+        }
+        Ok(())
+    })();
+    if let Err(e) = result {
+        let skipped = if skipped.is_empty() { String::new() } else { format!(" (script object not loaded: {})", skipped.join("; ")) };
+        out.error = Some(format!("{e}{skipped}"));
+    }
+    if let Some(h) = ctx.remove_data::<Shared>() {
+        let h = h.into_inner();
+        out.notes = h.notes();
+        out.effects = h.effects;
+        out.console = h.console;
+    }
+    clip_result(&mut out);
+    // A script that froze the global object leaves nothing the next script can set up in: it gets an engine of its own.
+    if shared && persist.ctx.global_object().is_extensible(&mut persist.ctx).unwrap_or(false) {
+        PERSIST.with(|p| *p.borrow_mut() = Some(persist));
+    }
+    out
+}
+
+/// The script objects a script runs with.
+pub(crate) struct ScriptCode<'a> {
+    /// The JavaScript that defines them.
+    pub(crate) prelude: &'a str,
+    /// The text of the ones that are data, by name.
+    pub(crate) texts: Vec<(String, String)>,
+    /// Where the form's objects were laid out.
+    pub(crate) layout: std::sync::Arc<Vec<XfaBox>>,
+    /// Whether the engine is the session's, kept for the scripts after this one.
+    pub(crate) shared: bool,
+}
+
+/// A script engine kept between the scripts of a session (the thread they run on holds it), with what is defined in it.
+struct Persist {
+    shape: u64,
+    ctx: Context,
+    /// The script objects defined in `ctx`: the hash of the code that defined each, and why it did not load, if it did not.
+    defined: HashMap<String, (u64, Option<String>)>,
+    /// The names the last script's set-up gave the global object.
+    names: Vec<String>,
+}
+
+std::thread_local! {
+    static PERSIST: RefCell<Option<Persist>> = const { RefCell::new(None) };
+}
+
+/// Let go of the engine kept for a session that is over. A thread must do it before it ends: the engine cannot be dropped by
+/// the thread's own cleanup.
+pub(crate) fn drop_shared() {
+    PERSIST.with(|p| *p.borrow_mut() = None);
+}
