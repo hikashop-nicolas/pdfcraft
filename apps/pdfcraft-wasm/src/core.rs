@@ -151,6 +151,8 @@ impl Document {
                     .map(|w| match w {
                         RenderWarning::ContentTruncated => "content-truncated",
                         RenderWarning::ColourFallback => "colour-fallback",
+                        RenderWarning::MalformedIndexedImage => "malformed-indexed-image",
+                        RenderWarning::Type3WidthsMissing => "type3-widths-missing",
                     })
                     .collect();
                 Ok(Raster { width: out.width, height: out.height, rgba: out.rgba.to_vec(), warnings })

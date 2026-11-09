@@ -8,11 +8,9 @@
 //! after `/UserUnit` and `/Rotate`), so items stay upright on rotated pages; an item records the
 //! `/UserUnit` it was written for.
 
-use std::collections::{HashMap, HashSet};
-
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 use pdfcraft_fonts::{
-    GlyphError, GlyphOutline, ShapedCluster, ShapedScript, Std14, literal, shape_arabic, shape_cjk, shape_hang, shape_hans, shape_hebrew,
+    GlyphError, GlyphOutline, ShapedScript, Std14, literal, shape_arabic, shape_cjk, shape_hang, shape_hans, shape_hebrew,
     shape_latin, shape_thai, shaped_glyph, win_ansi,
 };
 use unicode_bidi::{Level, ParagraphBidiInfo};
@@ -24,6 +22,7 @@ mod layout;
 mod store;
 mod types;
 
+pub(crate) use draw::thai_glyph_resources;
 #[cfg(test)]
 use draw::{GLYPHS_PER_FONT, LaidLine, draw_laid_shaped};
 #[cfg(test)]
@@ -32,9 +31,13 @@ use layout::Piece;
 pub(crate) use layout::WRAP_CALLS;
 pub(crate) use draw::mark_line;
 pub(crate) use layout::{first_unmarkable, is_hangul, mark_line_width, needs_fallback_face, prefer_hans};
+#[cfg(test)]
+pub(crate) use layout::shaped_width;
+#[cfg(test)]
+use pdfcraft_fonts::ShapedCluster;
 pub use layout::{PASTE_STEP, first_undrawable, lines, paste_place, paste_rect, text_rect, text_width};
 pub use store::{add_content, delete_content, isolate_content, list_added, scan_markers, update_content};
-pub use types::{Added, AddedImage, AddedText, Align, CHAR_SPACING_LIMIT, Family, MarkerScan};
+pub use types::{Added, AddedImage, AddedText, Align, CHAR_SPACING_LIMIT, Family, Ink, MarkerScan};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Content {
@@ -90,3 +93,5 @@ fn align_from(code: Option<i64>) -> Align {
 
 #[cfg(test)]
 mod arabic_tests;
+#[cfg(test)]
+mod thai_tests;

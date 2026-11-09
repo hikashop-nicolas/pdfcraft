@@ -1,9 +1,12 @@
+use pdfcraft_fonts::shaped_text::{is_thai, thai_refusal, thai_width};
+
 use super::marks::{
-    Background, Context, HeaderFooter, MarkKind, Watermark, add_picture_resource, bates_start, expand, matrix_number, n, picture, rgb, shrink_matrix,
+    Background, Context, HeaderFooter, MarkKind, MarkText, Watermark, add_picture_resource, bates_start, expand, matrix_number, n, picture, rgb,
+    shrink_matrix,
 };
 use super::place::{
     END, Isolation, add_page_fonts, add_page_resources, add_resources, begin, check, check_on_top, contents, free_font_name, isolation, page_fonts, page_list, place,
-    place_inside_wrapper, stream_tag, text_op, undrawable, wrapper_role,
+    place_inside_wrapper, stream_tag, undrawable, wrapper_role,
 };
 use super::{Dict, Document, EditError, Object, added, backdrop, helvetica_width};
 
@@ -30,6 +33,9 @@ fn add_header_footer_in_place(doc: &mut Document, pages: &[usize], hf: &HeaderFo
     check(pages, all.len())?;
     if hf.text.iter().all(|t| t.trim().is_empty()) {
         return Err(EditError::Invalid("type the header or footer text first".into()));
+    }
+    if let Some(why) = hf.text.iter().find_map(|t| thai_refusal(t)) {
+        return Err(EditError::Invalid(why));
     }
     if let Some(c) = hf.first_undrawable() {
         return Err(undrawable(c));
@@ -73,12 +79,23 @@ fn add_header_footer_in_place(doc: &mut Document, pages: &[usize], hf: &HeaderFo
     }
     let all = page_list(doc);
     let count = all.len();
+    let number_of = |k: usize| {
+        u32::try_from(u64::from(hf.start_number) + k as u64).map_err(|_| EditError::Invalid("the header page numbers are too large".into()))
+    };
+    let bates_of = |k: usize| bates0.checked_add(k as u64).ok_or_else(|| EditError::Invalid("the Bates numbers are too large".into()));
+    // Every Thai line drawn on any page (a Bates prefix may join a template's Thai), for its fonts.
+    let mut thai_lines = std::collections::BTreeSet::new();
+    if hf.text.iter().any(|t| t.chars().any(is_thai)) {
+        for k in 0..pages.len() {
+            let (number, bates) = (number_of(k)?, bates_of(k)?);
+            thai_lines.extend(hf.text.iter().flat_map(|t| expand(t, number, count, bates, cx).lines().map(str::to_owned).collect::<Vec<_>>()));
+        }
+    }
+    let thai = MarkText::new(doc, &all, pages, thai_lines.iter().map(String::as_str))?;
     for (k, &i) in pages.iter().enumerate() {
         let page = &all[i];
         let (w, h) = page.display_size(doc);
-        let number =
-            u32::try_from(u64::from(hf.start_number) + k as u64).map_err(|_| EditError::Invalid("the header page numbers are too large".into()))?;
-        let bates = bates0.checked_add(k as u64).ok_or_else(|| EditError::Invalid("the Bates numbers are too large".into()))?;
+        let (number, bates) = (number_of(k)?, bates_of(k)?);
         let size = hf.font_size;
         let [top, bottom, left, right] = hf.margins;
         // The page resource the face is added under: the usual name, unless the page already
@@ -91,6 +108,7 @@ fn add_header_footer_in_place(doc: &mut Document, pages: &[usize], hf: &HeaderFo
         let base = hf.font.base_font(false, false);
         let resource = free_font_name(doc, &page_fonts(doc, page), preferred, base);
         let mut body: Vec<u8> = format!("BT\n/{resource} {} Tf\n{}\n", n(size), rgb(hf.color)).into_bytes();
+        let mut current = None;
         let mut underlines = String::new();
         // lines with letters the standard fonts lack are drawn apart, from the fallback faces
         let mut fallback: Vec<u8> = Vec::new();
@@ -106,7 +124,8 @@ fn add_header_footer_in_place(doc: &mut Document, pages: &[usize], hf: &HeaderFo
             for (li, line) in lines.iter().enumerate() {
                 // Centred and right-aligned text is placed by its width in the chosen face.
                 let drawn_apart = added::needs_fallback_face(line);
-                let tw = if drawn_apart { added::mark_line_width(line, size) } else { hf.font.width(line, size, false, false) };
+                let face = |s: &str, size: f64| hf.font.width(s, size, false, false);
+                let tw = if drawn_apart { added::mark_line_width(line, size) } else { thai_width(line, size, face) };
                 let x = match slot % 3 {
                     0 => left,
                     1 => (w - tw) / 2.0,
@@ -126,7 +145,7 @@ fn add_header_footer_in_place(doc: &mut Document, pages: &[usize], hf: &HeaderFo
                         fallback_fonts.set(name.clone(), font.clone());
                     }
                 } else {
-                    body.extend(text_op(x, y, line));
+                    thai.show(&mut body, line, x, y, size, &resource, |s| face(s, size), &mut current);
                 }
                 if hf.underline {
                     underlines.push_str(&format!("{} {} {} {} re f\n", n(x), n(y - size * 0.15), n(tw), n((size * 0.06).max(0.4))));
@@ -146,6 +165,7 @@ fn add_header_footer_in_place(doc: &mut Document, pages: &[usize], hf: &HeaderFo
             add_page_resources(doc, page, None, &[(resource.into_bytes(), base)])?;
         }
         add_page_fonts(doc, &page_list(doc)[i].clone(), &fallback_fonts)?;
+        thai.add_to(doc, &page_list(doc)[i])?;
         let page = &page_list(doc)[i];
         place(doc, page, MarkKind::HeaderFooter, content, false)?;
         if let Some(Some(m)) = shrinks.get(k) {
@@ -170,6 +190,9 @@ fn add_watermark_in_place(doc: &mut Document, pages: &[usize], wm: &Watermark, r
     if text.is_empty() && wm.source.is_none() {
         return Err(EditError::Invalid("type the watermark text first".into()));
     }
+    if let Some(why) = wm.source.is_none().then(|| thai_refusal(text)).flatten() {
+        return Err(EditError::Invalid(why));
+    }
     if let Some(c) = wm.first_undrawable() {
         return Err(undrawable(c));
     }
@@ -191,6 +214,7 @@ fn add_watermark_in_place(doc: &mut Document, pages: &[usize], wm: &Watermark, r
     }
     let opacity = wm.opacity.clamp(0.0, 1.0);
     let lines: Vec<&str> = text.lines().collect();
+    let thai = if wm.source.is_none() { MarkText::new(doc, &page_list(doc), pages, lines.iter().copied())? } else { MarkText::default() };
     for &i in pages {
         let page = page_list(doc)[i].clone();
         let (w, h) = page.display_size(doc);
@@ -207,7 +231,7 @@ fn add_watermark_in_place(doc: &mut Document, pages: &[usize], wm: &Watermark, r
         }
         let widest = lines
             .iter()
-            .map(|l| if added::needs_fallback_face(l) { added::mark_line_width(l, 1.0) } else { helvetica_width(l, 1.0) })
+            .map(|l| if added::needs_fallback_face(l) { added::mark_line_width(l, 1.0) } else { thai_width(l, 1.0, helvetica_width) })
             .fold(0.0, f64::max)
             .max(0.01);
         let size = if wm.font_size > 0.0 { wm.font_size } else { ((w * w + h * h).sqrt() * 0.5 / widest).clamp(6.0, 300.0) };
@@ -234,6 +258,7 @@ fn add_watermark_in_place(doc: &mut Document, pages: &[usize], wm: &Watermark, r
         let mut fallback: Vec<u8> = Vec::new();
         let mut fallback_fonts = Dict::new();
         let taken = page_fonts(doc, &page);
+        let mut current = None;
         for (li, line) in lines.iter().enumerate() {
             let y = total / 2.0 - li as f64 * line_h - size * 0.35;
             if added::needs_fallback_face(line) {
@@ -249,8 +274,8 @@ fn add_watermark_in_place(doc: &mut Document, pages: &[usize], wm: &Watermark, r
                     fallback_fonts.set(name.clone(), font.clone());
                 }
             } else {
-                let tw = helvetica_width(line, size);
-                content.extend(text_op(-tw / 2.0, y, line));
+                let tw = thai_width(line, size, helvetica_width);
+                thai.show(&mut content, line, -tw / 2.0, y, size, "PCHelv", |s| helvetica_width(s, size), &mut current);
             }
         }
         content.extend_from_slice(b"ET\n");
@@ -258,6 +283,7 @@ fn add_watermark_in_place(doc: &mut Document, pages: &[usize], wm: &Watermark, r
         content.extend_from_slice(END.as_bytes());
         add_resources(doc, &page, Some(opacity), None)?;
         add_page_fonts(doc, &page_list(doc)[i].clone(), &fallback_fonts)?;
+        thai.add_to(doc, &page_list(doc)[i])?;
         let page = &page_list(doc)[i];
         place(doc, page, MarkKind::Watermark, content, wm.behind)?;
     }
