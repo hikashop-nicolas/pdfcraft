@@ -6,6 +6,7 @@ use super::{
     Attribute, Context, HashMap, HashSet, JsResult, JsString, JsValue, NativeFunction, ObjectInitializer, arg, function, js_string, platform, printd,
     printf, printx, s, scand, text,
 };
+use std::sync::Arc;
 
 // ── xfa.host, xfa.layout, xfa.event, app, console ───────────────────────────────────────────
 
@@ -341,6 +342,7 @@ pub(super) fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current
     ctx.register_global_property(js_string!("xfa"), xfa, rw)?;
     ctx.register_global_property(js_string!("event"), ev, rw)?;
     ctx.register_global_property(js_string!("__xfa_this"), this_node, rw)?;
+    let plug_ins: JsValue = boa_engine::object::builtins::JsArray::new(ctx)?.into();
     let app = ObjectInitializer::new(ctx)
         .function(NativeFunction::from_fn_ptr(app_alert), js_string!("alert"), 4)
         .function(NativeFunction::from_fn_ptr(beep), js_string!("beep"), 1)
@@ -351,6 +353,7 @@ pub(super) fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current
         .function(NativeFunction::from_fn_ptr(noop), js_string!("setInterval"), 2)
         .function(NativeFunction::from_fn_ptr(noop), js_string!("clearTimeOut"), 1)
         .function(NativeFunction::from_fn_ptr(noop), js_string!("clearInterval"), 1)
+        .property(js_string!("plugIns"), plug_ins, Attribute::READONLY)
         .property(js_string!("viewerType"), s("Exchange-Pro"), Attribute::READONLY)
         .property(js_string!("viewerVariation"), s("Full"), Attribute::READONLY)
         .property(js_string!("viewerVersion"), JsValue::from(24.0), Attribute::READONLY)
@@ -493,25 +496,125 @@ pub(super) fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current
     // A name the scopes do not reach but the code uses and the form holds once is that object (Acrobat finds it too).
     let words: HashSet<&str> = code.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).filter(|w| !w.is_empty()).collect();
     let defined: HashSet<String> = defined.into_iter().collect();
+    // the script objects it reaches name nodes too (`NotePage.presence` in a library), which they find the same way
+    let object_words: Vec<Arc<HashSet<String>>> = host(ctx)?.borrow().codes.iter().map(|c| words_of(&c.2)).collect();
+    let used = |name: &str| words.contains(name) || object_words.iter().any(|w| w.contains(name));
     let mut unique: HashMap<String, Option<usize>> = HashMap::new();
+    // `_name`: the instance manager of the repeatable subforms of that name, when they are under one parent
+    let mut managers: HashMap<String, Option<usize>> = HashMap::new();
     {
         let h = host(ctx)?.borrow();
         for (i, n) in h.nodes.iter().enumerate() {
-            if n.gone || !words.contains(n.name.as_str()) || !is_identifier(&n.name) || defined.contains(&n.name) {
+            if n.gone || !is_identifier(&n.name) {
+                continue;
+            }
+            if n.repeatable
+                && let Some(p) = n.parent
+            {
+                let im = format!("_{}", n.name);
+                if !defined.contains(&im) && used(&im) {
+                    managers.entry(n.name.clone()).and_modify(|e| *e = e.filter(|q| *q == p)).or_insert(Some(p));
+                }
+            }
+            if !used(&n.name) || defined.contains(&n.name) {
                 continue;
             }
             unique.entry(n.name.clone()).and_modify(|e| *e = None).or_insert(Some(i));
         }
     }
+    for (name, parent) in managers {
+        if let Some(p) = parent {
+            let im = instance_manager(ctx, p, &name)?;
+            ctx.register_global_property(JsString::from(format!("_{name}").as_str()), im, rw)?;
+            installed.push(format!("_{name}"));
+        }
+    }
+    let mut taken: HashSet<String> = defined.clone();
     for (name, node) in unique {
         if let Some(c) = node {
             let obj = node_object(ctx, c)?;
             ctx.register_global_property(JsString::from(name.as_str()), obj, rw)?;
+            taken.insert(name.clone());
             installed.push(name);
         }
     }
+    // The script's node is in scope too, as in Acrobat: a member read without `this.` (`parent`, `caption`, `rawValue`) is the
+    // node's, unless something nearer has the name.
+    let members: Vec<&str> = NODE_MEMBERS.iter().copied().filter(|m| words.contains(m) && !taken.contains(*m)).collect();
+    if !members.is_empty() {
+        let list = members.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>().join(", ");
+        let code = format!(
+            "(function (busy) {{ [{list}].forEach(function (n) {{ Object.defineProperty(globalThis, n, {{ configurable: true, \
+             get: function () {{ if (busy[n]) return undefined; busy[n] = true; \
+               try {{ var v = __xfa_this[n]; return /^(resolveNodes?|exec[A-Z]|[a-z]+Items?$|boundItem|get[A-Z])/.test(n) && v ? v.bind(__xfa_this) : v; }} \
+               finally {{ busy[n] = false; }} }}, \
+             set: function (v) {{ __xfa_this[n] = v; }} }}); }}); }})({{}});"
+        );
+        ctx.eval(boa_engine::Source::from_bytes(code.as_bytes()))?;
+        installed.extend(members.iter().map(ToString::to_string));
+    }
     Ok(installed)
 }
+
+/// The identifier-like words of a script object's code, read once per object.
+fn words_of(code: &Arc<str>) -> Arc<HashSet<String>> {
+    /// Word sets by where the code is.
+    type Words = HashMap<(usize, usize), Arc<HashSet<String>>>;
+    thread_local! {
+        static WORDS: std::cell::RefCell<Words> = std::cell::RefCell::new(HashMap::new());
+    }
+    let at = (code.as_ptr() as usize, code.len());
+    WORDS.with(|w| {
+        let mut w = w.borrow_mut();
+        if let Some(known) = w.get(&at) {
+            return Arc::clone(known);
+        }
+        let set: HashSet<String> =
+            code.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).filter(|w| !w.is_empty()).map(str::to_string).collect();
+        let set = Arc::new(set);
+        if w.len() >= 1024 {
+            w.clear();
+        }
+        w.insert(at, Arc::clone(&set));
+        set
+    })
+}
+
+/// Members of the script's node it may read without `this.`: names a script would not use for a variable of its own.
+const NODE_MEMBERS: &[&str] = &[
+    "parent",
+    "caption",
+    "rawValue",
+    "formattedValue",
+    "presence",
+    "access",
+    "instanceIndex",
+    "instanceManager",
+    "somExpression",
+    "isNull",
+    "mandatory",
+    "border",
+    "font",
+    "ui",
+    "assist",
+    "occur",
+    "para",
+    "margin",
+    "resolveNode",
+    "resolveNodes",
+    "execEvent",
+    "execCalculate",
+    "execValidate",
+    "execInitialize",
+    "clearItems",
+    "addItem",
+    "boundItem",
+    "getDisplayItem",
+    "getSaveItem",
+    "deleteItem",
+    "setItems",
+    "selectedIndex",
+];
 
 pub(super) fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();

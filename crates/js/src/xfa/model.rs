@@ -56,6 +56,8 @@ pub struct XfaNode {
     /// Fields: the value shown in the field's display picture, what `formattedValue` reads;
     /// `None` when the picture doesn't change it (the raw value is read then).
     pub formatted: Option<String>,
+    /// Choice lists: the items, as shown and as saved.
+    pub items: Vec<(String, String)>,
 }
 
 /// The event a script runs for.

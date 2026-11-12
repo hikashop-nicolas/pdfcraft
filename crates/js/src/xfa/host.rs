@@ -25,6 +25,8 @@ pub(crate) struct HNode {
     pub(crate) gone: bool,
     /// See [`XfaNode::formatted`]; dropped when a script sets the value, which it no longer shows.
     pub(crate) formatted: Option<String>,
+    /// Choice lists: the items, as shown and as saved, as the script's list methods leave them.
+    pub(crate) items: Vec<(String, String)>,
 }
 
 /// The form as a script sees and changes it, with the effects it records.
@@ -305,6 +307,7 @@ fn flatten(n: &XfaNode, parent: Option<usize>, out: &mut Vec<HNode>, depth: usiz
         children: Vec::new(),
         gone: false,
         formatted: n.formatted.clone(),
+        items: n.items.clone(),
     });
     let mut kids = Vec::new();
     for c in &n.children {

@@ -164,6 +164,7 @@ fn clone_subtree(h: &mut XHost, src: usize, parent: Option<usize>, depth: usize)
                 gone: false,
                 // The copy holds no value, so nothing is shown in its picture either.
                 formatted: None,
+                items: n.items.clone(),
             },
             n.children.clone(),
         )

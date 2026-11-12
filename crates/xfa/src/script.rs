@@ -54,6 +54,8 @@ pub struct FormNode {
     pub children: Vec<FormNode>,
     /// Fields: the display picture (see [`Field::display_picture`]), for `formattedValue`.
     pub display_picture: Option<String>,
+    /// Choice lists: the items, as shown and as saved.
+    pub items: Vec<(String, String)>,
 }
 
 /// A script the template runs for an event of one node instance.
@@ -276,6 +278,11 @@ impl Walker<'_> {
             index,
             children: Vec::new(),
             display_picture: f.display_picture.clone(),
+            items: if f.ui == crate::model::Ui::ChoiceList {
+                f.items.iter().enumerate().map(|(i, shown)| (shown.clone(), f.item_values.get(i).unwrap_or(shown).clone())).collect()
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -340,6 +347,7 @@ impl Walker<'_> {
                             index,
                             children,
                             display_picture: None,
+                            items: Vec::new(),
                         });
                     }
                 }

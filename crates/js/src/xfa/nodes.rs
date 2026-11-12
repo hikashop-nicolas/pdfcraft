@@ -23,10 +23,57 @@ pub(super) fn node_index(target: &JsValue, ctx: &mut Context) -> JsResult<usize>
 
 /// A Proxy standing for node `idx`.
 pub(super) fn node_object(ctx: &mut Context, idx: usize) -> JsResult<JsValue> {
+    // one object per node, as in Acrobat: a script that keeps a node and compares it with `==` later finds it again. The
+    // engine keeps them while the form has the same structure (a kept engine is let go of when it changes).
+    if let Some(known) = ctx.get_data::<NodeObjects>().and_then(|c| c.0.borrow().get(&idx).cloned()) {
+        return Ok(known.into());
+    }
     let target = ObjectInitializer::new(ctx).property(JsString::from(IDX), JsValue::from(idx as f64), Attribute::READONLY).build();
-    let proxy = JsProxy::builder(target).get(node_get).set(node_set).has(node_has).build(ctx)?;
+    let proxy: JsObject = JsProxy::builder(target).get(node_get).set(node_set).has(node_has).build(ctx)?.into();
+    if ctx.get_data::<NodeObjects>().is_none() {
+        ctx.insert_data(NodeObjects::default());
+    }
+    if let Some(c) = ctx.get_data::<NodeObjects>() {
+        let mut c = c.0.borrow_mut();
+        if c.len() < super::model::MAX_NODES {
+            c.insert(idx, proxy.clone());
+        }
+    }
     Ok(proxy.into())
 }
+
+/// `node.variables`: an object whose members are the script objects and variables node `idx` reaches.
+fn variables_object(ctx: &mut Context, idx: usize) -> JsResult<JsValue> {
+    let target = ObjectInitializer::new(ctx).property(JsString::from(IDX), JsValue::from(idx as f64), Attribute::READONLY).build();
+    Ok(JsProxy::builder(target).get(variables_get).build(ctx)?.into())
+}
+
+/// `node.variables[name]`: the script object `name` the node declares, or `undefined`.
+fn variables_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let key = arg(args, 1);
+    if key.as_symbol().is_some() {
+        return Ok(JsValue::undefined());
+    }
+    let idx = arg(args, 0).as_object().map(|t| t.get(JsString::from(IDX), ctx)).transpose()?.and_then(|v| v.as_number()).map(|n| n as usize);
+    let (Some(idx), name) = (idx, text(&key, ctx)?) else { return Ok(JsValue::undefined()) };
+    if name == "resolveNode" {
+        // `variables.resolveNode("formScript")`: one of them by name
+        let key = ObjectInitializer::new(ctx).property(js_string!("idx"), JsValue::from(idx as f64), Attribute::READONLY).build();
+        fn named(_: &JsValue, args: &[JsValue], key: &JsObject, ctx: &mut Context) -> JsResult<JsValue> {
+            let idx = key.get(js_string!("idx"), ctx)?.to_number(ctx)? as usize;
+            let name = text(&arg(args, 0), ctx)?;
+            let name = name.rsplit('.').next().unwrap_or(&name).split('[').next().unwrap_or("").to_string();
+            let found = script_object_named(ctx, idx, &name)?;
+            Ok(if found.is_undefined() { JsValue::null() } else { found })
+        }
+        return Ok(function(ctx, NativeFunction::from_copy_closure_with_captures(named, key)).into());
+    }
+    script_object_named(ctx, idx, &name)
+}
+
+/// The object given for each node, by index ([`node_object`]).
+#[derive(Default)]
+struct NodeObjects(std::cell::RefCell<std::collections::HashMap<usize, JsObject>>);
 
 /// An object that takes any property read or write without complaint (`this.border.fill…`,
 /// `this.fillColor = …`): what a script sets there changes nothing here.
@@ -301,6 +348,22 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
             Some(p) => instance_manager(ctx, p, &name)?,
             None => JsValue::undefined(),
         },
+        // `subform.variables.calcs`: the script objects the subform declares
+        "variables" => variables_object(ctx, idx)?,
+        // the occurrence limits, as an object a script reads and sets (what it sets is its own: the host keeps the template's)
+        "occur" => {
+            let (min, max) = {
+                let h = host(ctx)?.borrow();
+                h.nodes.get(idx).map_or((1, Some(1)), |n| (n.occur_min, n.occur_max))
+            };
+            let max = max.map_or(JsValue::from(-1.0), |m| JsValue::from(m as f64));
+            ObjectInitializer::new(ctx)
+                .property(js_string!("min"), JsValue::from(min as f64), Attribute::all())
+                .property(js_string!("max"), max, Attribute::all())
+                .property(js_string!("initial"), JsValue::from(min as f64), Attribute::all())
+                .build()
+                .into()
+        }
         "resolveNode" => resolver(ctx, idx, false)?,
         "resolveNodes" => resolver(ctx, idx, true)?,
         "recalculate" => function(ctx, NativeFunction::from_fn_ptr(recalculate)).into(),
@@ -316,17 +379,26 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
         | "isPropertySpecified"
         | "loadXML"
         | "saveXML"
-        | "clearItems"
-        | "addItem"
-        | "deleteItem"
         | "setItemState"
         | "clone" => function(ctx, NativeFunction::from_fn_ptr(noop)).into(),
+        "clearItems" | "addItem" | "deleteItem" | "setItems" | "boundItem" | "getDisplayItem" | "getSaveItem" => list_method(ctx, idx, &key)?,
         "createNode" => function(ctx, NativeFunction::from_fn_ptr(sink_apply)).into(),
         "getItemState" => function(ctx, NativeFunction::from_fn_ptr(false_value)).into(),
-        "getDisplayItem" | "getSaveItem" => function(ctx, NativeFunction::from_fn_ptr(empty_text)).into(),
         "getDeltas" => function(ctx, NativeFunction::from_fn_ptr(empty_list)).into(),
         "toString" | "valueOf" | "toJSON" => function(ctx, NativeFunction::from_fn_ptr(node_to_string)).into(),
-        "length" => JsValue::undefined(),
+        // a choice list's item count
+        "length" => {
+            let h = host(ctx)?.borrow();
+            match h.nodes.get(idx) {
+                Some(n) if !n.items.is_empty() => JsValue::from(n.items.len() as f64),
+                _ => JsValue::undefined(),
+            }
+        }
+        "selectedIndex" if kind == XfaKind::Field => {
+            let h = host(ctx)?.borrow();
+            let at = h.nodes.get(idx).and_then(|n| n.items.iter().position(|(shown, saved)| *saved == value || *shown == value));
+            JsValue::from(at.map_or(-1.0, |i| i as f64))
+        }
         "border" | "ui" | "font" | "caption" | "fillColor" | "borderColor" | "fontColor" | "margin" | "para" | "assist" | "validate" | "format"
         | "items" | "bind" | "keep" | "h" | "w" | "x" | "y" | "minH" | "maxH" | "minW" | "maxW" | "layout" | "model" | "oneOfChild" | "locale"
         | "relevant" | "colSpan" | "dataNode" | "defaultValue" | "editValue" | "selectedIndex" | "event" | "calculate" | "traversal" | "extras"
@@ -401,12 +473,24 @@ fn object_by_som(ctx: &mut Context, from: usize, expr: &str) -> JsResult<JsValue
         Some((p, n)) => (Some(p), n),
         None => (None, expr),
     };
+    // `form1.#variables[0].calcs`, `form1.variables.calcs`: the step names where the objects are kept, not a node
+    let is_variables = |step: &str| step == "variables" || step.split('[').next() == Some("#variables");
+    let parent = match parent {
+        Some(p) if is_variables(p) => None,
+        Some(p) => match p.rsplit_once('.') {
+            Some((before, last)) if is_variables(last) => Some(before),
+            _ => Some(p),
+        },
+        None => None,
+    };
     let name = name.split('[').next().unwrap_or(name);
     let at = match parent {
         Some(p) => resolve_som(&host(ctx)?.borrow(), from, p).first().copied(),
         None => Some(from),
     };
     let found = match at {
+        // `form1.#variables[0]` itself: where the objects and variables are kept
+        Some(i) if is_variables(name) || name == "#variables" => variables_object(ctx, i)?,
         Some(i) => script_object_named(ctx, i, name)?,
         None => JsValue::undefined(),
     };
@@ -471,6 +555,83 @@ pub(super) fn noop(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsVa
 }
 
 /// `resolveNode(som)` / `resolveNodes(som)` bound to node `from`.
+/// A choice list method of node `idx` (`clearItems`, `addItem`, `boundItem`, …): the list it changes is the script's copy, which
+/// the script's later reads (`boundItem`, `length`) agree with.
+fn list_method(ctx: &mut Context, idx: usize, which: &str) -> JsResult<JsValue> {
+    let key = ObjectInitializer::new(ctx)
+        .property(js_string!("idx"), JsValue::from(idx as f64), Attribute::READONLY)
+        .property(js_string!("which"), JsValue::from(JsString::from(which)), Attribute::READONLY)
+        .build();
+    fn call(_: &JsValue, args: &[JsValue], key: &JsObject, ctx: &mut Context) -> JsResult<JsValue> {
+        let idx = key.get(js_string!("idx"), ctx)?.to_number(ctx)? as usize;
+        let which = text(&key.get(js_string!("which"), ctx)?, ctx)?;
+        let given = arg(args, 0);
+        let first = if given.is_null_or_undefined() { None } else { Some(text(&given, ctx)?) };
+        let second = match args.get(1) {
+            Some(v) if !v.is_null_or_undefined() => Some(text(v, ctx)?),
+            _ => None,
+        };
+        let at = given.to_number(ctx).ok().filter(|n| n.is_finite() && *n >= 0.0).map(|n| n as usize);
+        let mut h = host(ctx)?.borrow_mut();
+        let Some(n) = h.nodes.get_mut(idx) else { return Ok(JsValue::undefined()) };
+        let item = |i: Option<usize>, saved: bool| -> JsValue {
+            match i.and_then(|i| n.items.get(i)) {
+                Some((shown, kept)) => JsValue::from(JsString::from(if saved { kept.as_str() } else { shown.as_str() })),
+                None => JsValue::null(),
+            }
+        };
+        Ok(match which.as_str() {
+            "getDisplayItem" => item(at, false),
+            "getSaveItem" => item(at, true),
+            // the saved value of the item shown as the text; text no item shows is given back as it is
+            "boundItem" => match &first {
+                Some(t) => {
+                    let saved = n.items.iter().find(|(shown, _)| shown == t).map_or(t.as_str(), |(_, saved)| saved.as_str());
+                    JsValue::from(JsString::from(saved))
+                }
+                None => JsValue::null(),
+            },
+            "clearItems" => {
+                n.items.clear();
+                JsValue::undefined()
+            }
+            "addItem" => {
+                if n.items.len() < MAX_ITEMS
+                    && let Some(shown) = first
+                {
+                    let saved = second.unwrap_or_else(|| shown.clone());
+                    n.items.push((shown, saved));
+                }
+                JsValue::undefined()
+            }
+            "deleteItem" => match at.filter(|i| *i < n.items.len()) {
+                Some(i) => {
+                    n.items.remove(i);
+                    JsValue::from(true)
+                }
+                None => JsValue::from(false),
+            },
+            // `setItems("a,b,c")`, or `setItems("shown1,saved1,shown2,saved2", 2)`
+            "setItems" => {
+                let parts: Vec<String> = first.unwrap_or_default().split(',').map(str::to_string).collect();
+                let pairs = second.as_deref().and_then(|c| c.trim().parse::<usize>().ok()) == Some(2);
+                n.items = if pairs {
+                    parts.chunks(2).map(|c| (c[0].clone(), c.get(1).cloned().unwrap_or_else(|| c[0].clone()))).collect()
+                } else {
+                    parts.into_iter().map(|p| (p.clone(), p)).collect()
+                };
+                n.items.truncate(MAX_ITEMS);
+                JsValue::undefined()
+            }
+            _ => JsValue::undefined(),
+        })
+    }
+    Ok(function(ctx, NativeFunction::from_copy_closure_with_captures(call, key)).into())
+}
+
+/// The most items a script may give one choice list.
+const MAX_ITEMS: usize = 10_000;
+
 pub(super) fn resolver(ctx: &mut Context, from: usize, many: bool) -> JsResult<JsValue> {
     let key = ObjectInitializer::new(ctx)
         .property(js_string!("from"), JsValue::from(from as f64), Attribute::READONLY)
@@ -484,8 +645,10 @@ pub(super) fn resolver(ctx: &mut Context, from: usize, many: bool) -> JsResult<J
         if many {
             return list_object(ctx, &found);
         }
+        let through_variables = expr.contains("#variables") || expr.contains(".variables.") || expr.starts_with("variables.");
         match found.first() {
             Some(i) => node_object(ctx, *i),
+            None if through_variables => object_by_som(ctx, from, &expr),
             // a part of the template the host does not model (`field.caption.value.#text`) stands in as an object that takes anything
             None if template_part_of_known_node(&host(ctx)?.borrow(), from, &expr) => sink(ctx),
             None => object_by_som(ctx, from, &expr),

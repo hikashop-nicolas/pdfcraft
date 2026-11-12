@@ -158,6 +158,7 @@ fn to_js(n: &FormNode) -> XfaNode {
         index: n.index,
         children: n.children.iter().map(to_js).collect(),
         formatted: n.display_picture.as_deref().and_then(|p| pdfcraft_xfa::formatted_value(p, &n.value)),
+        items: n.items.clone(),
     }
 }
 

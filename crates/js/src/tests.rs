@@ -630,6 +630,59 @@ mod xfa_model {
         run_xfa(script, &ev, &doc, &form(), Limits::default())
     }
 
+    /// A choice list's methods read and change its items (the script's copy): `boundItem` gives the saved value of a shown item,
+    /// `selectedIndex` the item the value is, `length` their count.
+    #[test]
+    fn choice_lists_give_their_items_to_scripts() {
+        let mut root = form();
+        let page = &mut root.children[0];
+        let mut list = field("country", "form1[0].page1[0].country[0]", "CA", false);
+        list.items = vec![("Canada".into(), "CA".into()), ("France".into(), "FR".into())];
+        page.children.push(list);
+        let ev = XfaEvent { activity: "change".into(), target: "form1[0].page1[0].country[0]".into(), ..Default::default() };
+        let doc = XfaDoc { file_name: "f.pdf".into(), page: 1, page_count: 3 };
+        let run = |s: &str| run_xfa(s, &ev, &doc, &root, Limits::default());
+        let o =
+            run("this.boundItem('France') + ',' + this.selectedIndex + ',' + this.length + ',' + this.getDisplayItem(1) + ',' + this.getSaveItem(9)");
+        assert_eq!(o.result.as_deref(), Some("FR,0,2,France,null"), "{o:?}");
+        // bare, as Acrobat puts the script's node in scope
+        let o = run(
+            "clearItems(); addItem('Japan', 'JP'); addItem('Peru'); boundItem('Japan') + ',' + this.length + ',' + boundItem('Peru') + ',' + boundItem('Mars')",
+        );
+        assert_eq!(o.result.as_deref(), Some("JP,2,Peru,Mars"), "{o:?}");
+        let o = run("this.setItems('a,1,b,2', 2); this.boundItem('b') + ',' + this.deleteItem(0) + ',' + this.length");
+        assert_eq!(o.result.as_deref(), Some("2,true,1"), "{o:?}");
+    }
+
+    /// A node is one object however a script reaches it: a list that keeps fields finds them again with `==`.
+    #[test]
+    fn a_node_is_the_same_object_however_it_is_reached() {
+        let o = go(
+            "var a = xfa.resolveNode('form1.page1.qty'); (a == qty) + ',' + (this == a) + ',' + (qty.parent == price.parent)",
+            "form1[0].page1[0].qty[0]",
+            "calculate",
+        );
+        assert_eq!(o.result.as_deref(), Some("true,true,true"), "{o:?}");
+    }
+
+    /// The script's node is in scope: `parent` and `rawValue` without `this.` are its own, unless a nearer name takes them.
+    #[test]
+    fn a_scripts_node_members_are_read_without_this() {
+        let o = go("parent.name + ',' + rawValue + ',' + typeof caption.value.text.value", "form1[0].page1[0].qty[0]", "calculate");
+        assert_eq!(o.error, None, "{o:?}");
+        assert!(o.result.as_deref().is_some_and(|r| r.starts_with("page1,4,")), "{o:?}");
+        let o = go("rawValue = 7; this.rawValue", "form1[0].page1[0].qty[0]", "calculate");
+        assert_eq!(o.result.as_deref(), Some("7"), "{o:?}");
+        // a member the node does not have reads as nothing, not as the global it would otherwise fall back to
+        let o = go("typeof somExpression + ',' + occur.max", "form1[0].page1[0].qty[0]", "calculate");
+        assert_eq!(o.error, None, "{o:?}");
+        let o = go("this.occur.min = '0'; xfa.resolveNode('form1.page1.table.row').occur.max", "form1[0].page1[0].qty[0]", "calculate");
+        assert_eq!(o.result.as_deref(), Some("-1"), "{o:?}");
+        // a variable of the script's own is not the node's
+        let o = go("var parent = 3; parent", "form1[0].page1[0].qty[0]", "calculate");
+        assert_eq!(o.result.as_deref(), Some("3"), "{o:?}");
+    }
+
     /// A calculate script finds its siblings by name and yields its last expression, and a
     /// value it sets comes back as an effect.
     #[test]
@@ -1896,6 +1949,45 @@ mod session {
         let names: String = (0..100_000).map(|i| format!("var v{i};")).collect();
         let e = with_objects(&mut s, "Wide.v1", &[("Wide", None, &names)]).unwrap_err();
         assert!(e.contains("more than 2048"), "{e}");
+        // through the subform's variables, as `#variables[0].name` or `variables.name`
+        let state = [("headerScript", Some("form1[0].page1[0]"), "function configure(p) { return 'configured ' + p.name; }")];
+        let calls = "page1.resolveNode('#variables[0].headerScript').configure(page1.parent) + ',' + xfa.resolveNode('form1.page1.#variables[0].headerScript').configure(page1) + ',' + page1.variables.headerScript.configure(page1)";
+        assert_eq!(with_objects(&mut s, calls, &state).as_deref(), Ok("configured form1,configured page1,configured page1"));
+        // an object names nodes the script's scope does not reach, found as the form's only ones of their name
+        let lib = [("Lib", None, "function f() { return note.name + ',' + _row.count; }")];
+        assert_eq!(with_objects(&mut s, "Lib.f()", &lib).as_deref(), Ok("note,2"));
+        // an object called `util` is the form's for the objects that call it, script after script
+        let objs = [
+            ("util", Some("form1[0]"), "function setCaption(n, t) { return 'set ' + t; }"),
+            ("color", Some("form1[0]"), "function mark(n) { return util.setCaption(n, 'x'); }"),
+        ];
+        assert_eq!(with_objects(&mut s, "color.mark(this)", &objs).as_deref(), Ok("set x"));
+        assert_eq!(with_objects(&mut s, "color.mark(this)", &objs).as_deref(), Ok("set x"));
+        assert_eq!(with_objects(&mut s, "util.setCaption(this, 'y')", &objs).as_deref(), Ok("set y"));
+        assert_eq!(with_objects(&mut s, "color.mark(this)", &objs).as_deref(), Ok("set x"));
+        // a caption is read and set through its value's `#text`, as the IRCC libraries do
+        let caption = [
+            (
+                "captions",
+                Some("form1[0]"),
+                "function getCaption(o) { var s = o.caption.value.resolveNode('#text').value; if (s == 'false' || s == 'true') { s = o.caption.value.resolveNode('#exData').value; } return s; }\nfunction setCaption(o, s) { o.caption.value.resolveNode('#text').value = s; }",
+            ),
+            (
+                "paint",
+                Some("form1[0]"),
+                "function markUnRequired(o) { o.mandatory = 'disabled'; captions.setCaption(o, captions.getCaption(o).replace(/^\\*+|\\*+$/g, '')); if (o.className == 'field' && o.ui.oneOfChild.className == 'checkButton' && o.parent.className == 'exclGroup') { o.parent.mandatory = 'disabled'; } return 'ok'; }",
+            ),
+        ];
+        assert_eq!(with_objects(&mut s, "paint.markUnRequired(qty)", &caption).as_deref(), Ok("ok"));
+        // `form1.#variables[0]` itself holds the form's variables
+        let mut sc = script(
+            "var v = xfa.form.resolveNode('form1.#variables[0]'); v.varFormID.value + ',' + form1.variables.varFormID.rawValue + ',' + v.resolveNode('varFormID').value",
+            false,
+            "form1[0].page1[0].total[0]",
+            "calculate",
+        );
+        sc.prelude = "Object.defineProperty(globalThis, \"varFormID\", { value: { value: \"PEN6246e\", rawValue: \"PEN6246e\" }, writable: true, configurable: true });\n/*__xfa_object_end__*/\n".into();
+        assert_eq!(s.run(sc).result.as_deref(), Some("PEN6246e,PEN6246e,PEN6246e"));
         // a module no event script names is built once the object it extends is
         let mut s = XfaSession::new(XfaDoc { page_count: 1, ..Default::default() });
         let mut sc = script("NS.jForm.x.f()", false, "form1[0].page1[0].total[0]", "calculate");
