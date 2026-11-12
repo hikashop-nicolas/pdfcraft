@@ -1873,6 +1873,11 @@ mod session {
         let state = [("calcs", Some("form1[0]"), "var n = 0; function inc() { return ++n; }\nvar who = this.name;")];
         assert_eq!(with_objects(&mut s, "calcs.inc() + ',' + calcs.who", &state).as_deref(), Ok("1,form1"));
         assert_eq!(with_objects(&mut s, "form1.calcs.inc()", &state).as_deref(), Ok("2"));
+        assert_eq!(with_objects(&mut s, "xfa.resolveNode('form1.calcs').inc() + xfa.resolveNode('calcs').inc()", &state).as_deref(), Ok("7"));
+        // one named like a built-in is reached through its subform only
+        let mut sc = script("Number('3') + 1 + form1.Number.x", false, "form1[0].page1[0].total[0]", "calculate");
+        sc.codes.push(("form1[0]|Number".into(), Some("form1[0]".into()), "var x = 9;".into()));
+        assert_eq!(s.run(sc).result.as_deref(), Some("13"));
         let e = with_objects(&mut s, "Deep.x", &[("Deep", None, &format!("var x = {}1;", "(".repeat(64_000)))]).unwrap_err();
         assert!(e.contains("nested too deeply"), "{e}");
         assert_eq!(s.dead(), None);

@@ -333,7 +333,7 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
                 // a script object or variable of the form is a child of its subform too (`xfa.form.nodes.item(0).LOV`)
                 None => match document_property(ctx, other)? {
                     Some(v) => v,
-                    None => script_object_named(ctx, other)?,
+                    None => script_object_named(ctx, idx, other)?,
                 },
             }
         }
@@ -354,13 +354,44 @@ fn document_property(ctx: &mut Context, name: &str) -> JsResult<Option<JsValue>>
     }))
 }
 
-/// The global object named `name`, when it is one a form defined (not what the host or JavaScript provides).
-fn script_object_named(ctx: &mut Context, name: &str) -> JsResult<JsValue> {
+/// The global object named `name`, when it is one a form defined (not what the host or JavaScript provides), or the script
+/// object of that name the subform at node `idx` declares when its name is a built-in's (`form1.Number`).
+fn script_object_named(ctx: &mut Context, idx: usize, name: &str) -> JsResult<JsValue> {
     if !is_identifier(name) || ["xfa", "app", "console", "event", "Math", "JSON", "Intl", "Reflect", "globalThis", "window"].contains(&name) {
         return Ok(JsValue::undefined());
     }
     let v = ctx.global_object().get(JsString::from(name), ctx)?;
-    Ok(if v.as_object().is_some_and(|o| !o.is_callable()) { v } else { JsValue::undefined() })
+    if v.as_object().is_some_and(|o| !o.is_callable()) {
+        return Ok(v);
+    }
+    let key = {
+        let h = host(ctx)?.borrow();
+        let Some(som) = h.nodes.get(idx).map(|n| n.som.to_string()) else { return Ok(JsValue::undefined()) };
+        let key = format!("{som}|{name}");
+        h.codes.iter().any(|(k, _, _)| *k == key).then_some(key)
+    };
+    match key {
+        Some(key) => super::objects::build_detached(ctx, &key, name),
+        None => Ok(JsValue::undefined()),
+    }
+}
+
+/// `resolveNode("form1.calcs")` or `resolveNode("calcs")` naming a script object rather than a node: the object, or `null`.
+fn object_by_som(ctx: &mut Context, from: usize, expr: &str) -> JsResult<JsValue> {
+    let (parent, name) = match expr.rsplit_once('.') {
+        Some((p, n)) => (Some(p), n),
+        None => (None, expr),
+    };
+    let name = name.split('[').next().unwrap_or(name);
+    let at = match parent {
+        Some(p) => resolve_som(&host(ctx)?.borrow(), from, p).first().copied(),
+        None => Some(from),
+    };
+    let found = match at {
+        Some(i) => script_object_named(ctx, i, name)?,
+        None => JsValue::undefined(),
+    };
+    Ok(if found.is_undefined() { JsValue::null() } else { found })
 }
 
 fn node_set(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
@@ -438,7 +469,7 @@ pub(super) fn resolver(ctx: &mut Context, from: usize, many: bool) -> JsResult<J
             Some(i) => node_object(ctx, *i),
             // a part of the template the host does not model (`field.caption.value.#text`) stands in as an object that takes anything
             None if template_part_of_known_node(&host(ctx)?.borrow(), from, &expr) => sink(ctx),
-            None => Ok(JsValue::null()),
+            None => object_by_som(ctx, from, &expr),
         }
     }
     Ok(function(ctx, NativeFunction::from_copy_closure_with_captures(resolve, key)).into())

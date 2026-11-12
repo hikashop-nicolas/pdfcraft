@@ -830,11 +830,12 @@ pub fn script_objects_for(tpl: &Template, som: &str) -> ScriptObjects {
             out.texts.push((o.name.clone(), Arc::clone(&o.text)));
             continue;
         }
-        // an ECMAScript built-in keeps its meaning for the form's scripts
+        let key = format!("{}|{}", at.as_deref().unwrap_or(""), o.name);
+        // an ECMAScript built-in keeps its meaning for the form's scripts: the object is reached through its subform only
         if BUILT_INS.contains(&o.name.as_str()) {
+            out.codes.push((key, at, Arc::clone(&o.text)));
             continue;
         }
-        let key = format!("{}|{}", at.as_deref().unwrap_or(""), o.name);
         let hash = {
             use std::hash::{Hash, Hasher};
             let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -1099,7 +1100,10 @@ mod script_object_tests {
         page.children.push(Node::Subform(Box::new(Subform { script_objects: vec![object("Mid")], children: inner, ..Default::default() })));
         let k = keys("form[0].page[0].total[0]", &tpl);
         assert!(k.contains(&"form[0].page[0]|Calc".into()) && !k.contains(&"form[0]|Calc".into()), "{k:?}");
-        assert!(k.iter().any(|k| k.ends_with("|Mid")) && !k.iter().any(|k| k.ends_with("|Number")), "{k:?}");
+        assert!(k.iter().any(|k| k.ends_with("|Mid")) && k.iter().any(|k| k.ends_with("|Number")), "{k:?}");
+        // a built-in's name gets no global: its object is reached through its subform
+        let p = script_objects_for(&tpl, "form[0].page[0].total[0]").prelude;
+        assert!(!p.contains("\"Number\""), "{p}");
         // page masters reach their page area's and the page set's objects
         tpl.root.page_set = Some(PageSet {
             script_objects: vec![object("sobModeCheck")],

@@ -30,6 +30,22 @@ thread_local! {
 pub(super) fn build(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let key = text(&arg(args, 0), ctx)?;
     let name = text(&arg(args, 1), ctx)?;
+    let value = build_value(ctx, &key, &name)?;
+    if value.is_undefined() {
+        return Ok(value);
+    }
+    let desc = PropertyDescriptor::builder().value(value.clone()).writable(true).configurable(true).enumerable(false);
+    ctx.global_object().define_property_or_throw(JsString::from(name.as_str()), desc, ctx)?;
+    Ok(value)
+}
+
+/// Code object `key` built for a script, its global left as it is: one named like a built-in (`form1.Number`).
+pub(super) fn build_detached(ctx: &mut Context, key: &str, name: &str) -> JsResult<JsValue> {
+    build_value(ctx, key, name)
+}
+
+fn build_value(ctx: &mut Context, key: &str, name: &str) -> JsResult<JsValue> {
+    let key = key.to_string();
     let (code, this) = {
         let mut h = host(ctx)?.borrow_mut();
         // an object reached again while it is being built (two that use each other at their top level) is not there yet
@@ -50,10 +66,7 @@ pub(super) fn build(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
     if let Ok(mut h) = host(ctx).map(RefCell::borrow_mut) {
         h.building.retain(|k| *k != key);
     }
-    let value = built.map_err(|why| JsNativeError::error().with_message(format!("the script object {name} did not load: {why}")))?;
-    let desc = PropertyDescriptor::builder().value(value.clone()).writable(true).configurable(true).enumerable(false);
-    ctx.global_object().define_property_or_throw(JsString::from(name.as_str()), desc, ctx)?;
-    Ok(value)
+    built.map_err(|why| JsNativeError::error().with_message(format!("the script object {name} did not load: {why}")).into())
 }
 
 fn compile(ctx: &mut Context, code: &str, this: Option<usize>) -> Result<JsValue, String> {
