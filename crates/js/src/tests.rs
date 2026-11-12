@@ -1846,7 +1846,7 @@ mod session {
                 "Object.defineProperty(globalThis, {name:?}, {{ configurable: true, get: function () {{ return __xfa_build({key:?}, {name:?}); }} }});\n/* {} */\n/*__xfa_object_end__*/\n",
                 code.len()
             ));
-            sc.codes.push((key, som.map(str::to_string), (*code).into()));
+            sc.codes.push((key, som.map(str::to_string), (*code).into(), true));
         }
         let o = s.run(sc);
         o.error.map_or(Ok(o.result.unwrap_or_default()), Err)
@@ -1876,8 +1876,18 @@ mod session {
         assert_eq!(with_objects(&mut s, "xfa.resolveNode('form1.calcs').inc() + xfa.resolveNode('calcs').inc()", &state).as_deref(), Ok("7"));
         // one named like a built-in is reached through its subform only
         let mut sc = script("Number('3') + 1 + form1.Number.x", false, "form1[0].page1[0].total[0]", "calculate");
-        sc.codes.push(("form1[0]|Number".into(), Some("form1[0]".into()), "var x = 9;".into()));
+        sc.codes.push(("form1[0]|Number".into(), Some("form1[0]".into()), "var x = 9;".into(), false));
         assert_eq!(s.run(sc).result.as_deref(), Some("13"));
+        // members are live: a write through the object reaches its functions, and theirs reach the object
+        let live = [("Live", None, "var step = 5; function twice(x) { return x * 2 + step; } function bump() { step++; }")];
+        assert_eq!(with_objects(&mut s, "Live.step = 10; var a = Live.twice(1); Live.bump(); a + ',' + Live.step", &live).as_deref(), Ok("12,11"));
+        // an outer object an inner one hides is reached through its subform, and comes before a stand-in member (`layout`)
+        let mut sc = script("Hid.who + ',' + form1.Hid.who + ',' + form1.layout.f()", false, "form1[0].page1[0].total[0]", "calculate");
+        sc.prelude = "Object.defineProperty(globalThis, \"Hid\", { configurable: true, get: function () { return __xfa_build(\"form1[0].page1[0]|Hid\", \"Hid\"); } });\n/*__xfa_object_end__*/\n".into();
+        sc.codes.push(("form1[0]|Hid".into(), Some("form1[0]".into()), "var who = 'outer';".into(), false));
+        sc.codes.push(("form1[0].page1[0]|Hid".into(), Some("form1[0].page1[0]".into()), "var who = 'inner';".into(), true));
+        sc.codes.push(("form1[0]|layout".into(), Some("form1[0]".into()), "function f() { return 'declared'; }".into(), false));
+        assert_eq!(s.run(sc).result.as_deref(), Some("inner,outer,declared"));
         let e = with_objects(&mut s, "Deep.x", &[("Deep", None, &format!("var x = {}1;", "(".repeat(64_000)))]).unwrap_err();
         assert!(e.contains("nested too deeply"), "{e}");
         assert_eq!(s.dead(), None);

@@ -33,7 +33,7 @@ pub(crate) struct XHost {
     /// The text of the form's data script objects, by name (`__xfa_text`).
     pub(crate) texts: Vec<(String, Arc<str>)>,
     /// The code script objects, by the key `__xfa_build` is called with, with the SOM of their subform ([`super::objects`]).
-    pub(crate) codes: Vec<(String, Option<String>, Arc<str>)>,
+    pub(crate) codes: Vec<(String, Option<String>, Arc<str>, bool)>,
     /// The code objects being built, against cycles; and the bytes of code built for the script ([`super::objects::MAX_BUILT_BYTES`]).
     pub(crate) building: Vec<String>,
     pub(crate) built_bytes: usize,

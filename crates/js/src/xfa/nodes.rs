@@ -321,7 +321,15 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
         "border" | "ui" | "font" | "caption" | "fillColor" | "borderColor" | "fontColor" | "margin" | "para" | "assist" | "validate" | "format"
         | "items" | "bind" | "keep" | "h" | "w" | "x" | "y" | "minH" | "maxH" | "minW" | "maxW" | "layout" | "model" | "oneOfChild" | "locale"
         | "relevant" | "colSpan" | "dataNode" | "defaultValue" | "editValue" | "selectedIndex" | "event" | "calculate" | "traversal" | "extras"
-        | "desc" => sink(ctx)?,
+        | "desc" => {
+            // a script object the subform declares comes before a member the host only stands in for (an object called `layout`)
+            let declared = {
+                let h = host(ctx)?.borrow();
+                let key = h.nodes.get(idx).map(|n| format!("{}|{key}", n.som));
+                key.is_some_and(|k| h.codes.iter().any(|c| c.0 == k))
+            };
+            if declared { script_object_named(ctx, idx, &key)? } else { sink(ctx)? }
+        }
         other => {
             if let Some(child) = other.strip_prefix('_') {
                 let exists = child_named(&host(ctx)?.borrow(), idx, child).is_some();
@@ -360,19 +368,21 @@ fn script_object_named(ctx: &mut Context, idx: usize, name: &str) -> JsResult<Js
     if !is_identifier(name) || ["xfa", "app", "console", "event", "Math", "JSON", "Intl", "Reflect", "globalThis", "window"].contains(&name) {
         return Ok(JsValue::undefined());
     }
-    let v = ctx.global_object().get(JsString::from(name), ctx)?;
-    if v.as_object().is_some_and(|o| !o.is_callable()) {
-        return Ok(v);
-    }
-    let key = {
+    // the code object the subform at `idx` declares: its global when it has one, else built for the script (an outer object an
+    // inner one hides, or one named like a built-in)
+    let declared = {
         let h = host(ctx)?.borrow();
         let Some(som) = h.nodes.get(idx).map(|n| n.som.to_string()) else { return Ok(JsValue::undefined()) };
         let key = format!("{som}|{name}");
-        h.codes.iter().any(|(k, _, _)| *k == key).then_some(key)
+        h.codes.iter().find(|c| c.0 == key).map(|c| (key, c.3))
     };
-    match key {
-        Some(key) => super::objects::build_detached(ctx, &key, name),
-        None => Ok(JsValue::undefined()),
+    match declared {
+        Some((_, true)) => ctx.global_object().get(JsString::from(name), ctx),
+        Some((key, false)) => super::objects::build_detached(ctx, &key, name),
+        None => {
+            let v = ctx.global_object().get(JsString::from(name), ctx)?;
+            Ok(if v.as_object().is_some_and(|o| !o.is_callable()) { v } else { JsValue::undefined() })
+        }
     }
 }
 

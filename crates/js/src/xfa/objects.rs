@@ -52,7 +52,7 @@ fn build_value(ctx: &mut Context, key: &str, name: &str) -> JsResult<JsValue> {
         if h.building.contains(&key) {
             return Ok(JsValue::undefined());
         }
-        let Some((_, som, code)) = h.codes.iter().find(|(k, _, _)| *k == key).cloned() else { return Ok(JsValue::undefined()) };
+        let Some((_, som, code, _)) = h.codes.iter().find(|(k, _, _, _)| *k == key).cloned() else { return Ok(JsValue::undefined()) };
         h.built_bytes = h.built_bytes.saturating_add(code.len());
         if h.built_bytes > MAX_BUILT_BYTES {
             let why = format!("the script object {name} was not loaded: the script's objects pass {} MiB", MAX_BUILT_BYTES >> 20);
@@ -74,7 +74,7 @@ fn compile(ctx: &mut Context, code: &str, this: Option<usize>) -> Result<JsValue
         return Err(why);
     }
     let members = members_of(code)?;
-    let wrapped = format!("(function () {{\n{code}\n;return {{ {members} }};\n}})");
+    let wrapped = format!("(function () {{\n{code}\n;return (function (o) {{ {members} return o; }})({{}});\n}})");
     let f = ctx.eval(Source::from_bytes(wrapped.as_bytes())).map_err(|e| e.to_string())?;
     let this = match this {
         Some(i) => node_object(ctx, i).map_err(|e| e.to_string())?,
@@ -86,8 +86,9 @@ fn compile(ctx: &mut Context, code: &str, this: Option<usize>) -> Result<JsValue
     }
 }
 
-/// `name: name, …` for every function, variable and lexical name `text` declares at its top level (`var`s in its blocks
-/// too), read by the parser so regular expressions, templates and strings are read as they run.
+/// A live member on `o` for every function, variable and lexical name `text` declares at its top level (`var`s in its blocks
+/// too): reading it reads the binding, writing it writes the binding, so `Calc.step = 10` changes what `Calc.twice` uses.
+/// The names are read by the parser, so regular expressions, templates and strings are read as they run.
 fn members_of(text: &str) -> Result<Arc<str>, String> {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -113,6 +114,7 @@ fn read_members(text: &str) -> Result<Arc<str>, String> {
     let mut interner = Interner::default();
     let body = Parser::new(Source::from_bytes(text.as_bytes())).parse_function_body(&mut interner, false, false).map_err(|e| e.to_string())?;
     let mut names: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for item in body.statements() {
         let syms: Vec<_> = match item {
             StatementListItem::Statement(s) => var_declared_names(&**s).into_iter().collect(),
@@ -120,11 +122,16 @@ fn read_members(text: &str) -> Result<Arc<str>, String> {
         };
         for sym in syms {
             let name = interner.resolve_expect(sym).to_string();
-            if !names.contains(&name) {
+            if seen.insert(name.clone()) {
                 names.push(name);
             }
         }
     }
     names.sort();
-    Ok(names.iter().map(|n| format!("{n}: {n}")).collect::<Vec<_>>().join(", ").into())
+    let member = |n: &String| {
+        format!(
+            "Object.defineProperty(o, {n:?}, {{ enumerable: true, configurable: true, get: function () {{ return {n}; }}, set: function (v) {{ {n} = v; }} }});"
+        )
+    };
+    Ok(names.iter().map(member).collect::<Vec<_>>().join(" ").into())
 }

@@ -43,7 +43,7 @@ pub struct Script {
     /// The text of the script objects that are data (`__xfa_text(name)` in the prelude reads it), by name.
     pub texts: Vec<(String, std::sync::Arc<str>)>,
     /// The code objects (`__xfa_build(key, name)` in the prelude builds one): key, SOM of their subform, code.
-    pub codes: Vec<(String, Option<String>, std::sync::Arc<str>)>,
+    pub codes: Vec<(String, Option<String>, std::sync::Arc<str>, bool)>,
     /// Where the form's objects were laid out (`xfa.layout`); empty when it was not asked for.
     pub layout: std::sync::Arc<Vec<crate::xfa::XfaBox>>,
     pub source: String,

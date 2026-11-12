@@ -248,7 +248,7 @@ pub(crate) struct ScriptCode<'a> {
     /// The text of the ones that are data, by name.
     pub(crate) texts: Vec<(String, std::sync::Arc<str>)>,
     /// The code objects, by key, with the SOM of their subform.
-    pub(crate) codes: Vec<(String, Option<String>, std::sync::Arc<str>)>,
+    pub(crate) codes: Vec<(String, Option<String>, std::sync::Arc<str>, bool)>,
     /// Where the form's objects were laid out.
     pub(crate) layout: std::sync::Arc<Vec<XfaBox>>,
     /// Whether the engine is the session's, kept for the scripts after this one.

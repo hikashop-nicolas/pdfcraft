@@ -260,6 +260,8 @@ fn data_text(info: &FieldInfo) -> String {
 struct Runner<'a, 'b> {
     doc: &'a mut pdfcraft_cos::Document,
     tpl: &'a Template,
+    /// Every script object of the template, read the first time a script needs it.
+    object_index: Option<pdfcraft_xfa::ScriptObjectIndex>,
     run: &'a mut XfaRun<'b>,
     clock: Clock,
     runs: usize,
@@ -303,6 +305,7 @@ impl<'a, 'b> Runner<'a, 'b> {
         Runner {
             doc,
             tpl,
+            object_index: None,
             run,
             clock: Clock::start(budget_ms),
             runs: 0,
@@ -768,9 +771,15 @@ impl<'a, 'b> Runner<'a, 'b> {
         let event = XfaEvent { activity: ev.activity.clone(), target: ev.som.clone(), new_text: new_text.to_string(), prev_text: String::new() };
         let root = to_js(&self.live().root);
         // a JavaScript event may call the script objects of its subform and those above it by name
-        let objects = if ev.formcalc { pdfcraft_xfa::ScriptObjects::default() } else { pdfcraft_xfa::script_objects_for(self.tpl, &ev.som) };
+        let objects = if ev.formcalc {
+            pdfcraft_xfa::ScriptObjects::default()
+        } else {
+            let tpl = self.tpl;
+            let index = self.object_index.get_or_insert_with(|| pdfcraft_xfa::ScriptObjectIndex::of(tpl));
+            pdfcraft_xfa::script_objects_for(tpl, index, &ev.som)
+        };
         // where things were laid out is worked out for the scripts that ask (`xfa.layout`), not for each one
-        let layout = if !ev.formcalc && (ev.script.contains("layout") || objects.codes.iter().any(|(_, _, t)| t.contains("layout"))) {
+        let layout = if !ev.formcalc && (ev.script.contains("layout") || objects.codes.iter().any(|c| c.2.contains("layout"))) {
             self.layout_boxes()
         } else {
             Default::default()
