@@ -788,6 +788,7 @@ impl<'a, 'b> Runner<'a, 'b> {
             prelude: objects.prelude,
             texts: objects.texts,
             codes: objects.codes,
+            modules: objects.modules,
             layout,
             source: ev.script.clone(),
             formcalc: ev.formcalc,

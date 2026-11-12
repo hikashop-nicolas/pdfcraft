@@ -34,6 +34,8 @@ pub(crate) struct XHost {
     pub(crate) texts: Vec<(String, Arc<str>)>,
     /// The code script objects, by the key `__xfa_build` is called with, with the SOM of their subform ([`super::objects`]).
     pub(crate) codes: Vec<(String, Option<String>, Arc<str>, bool)>,
+    /// The keys of the code objects that are modules: built once an object their code names is.
+    pub(crate) modules: Vec<String>,
     /// The code objects being built, against cycles; and the bytes of code built for the script ([`super::objects::MAX_BUILT_BYTES`]).
     pub(crate) building: Vec<String>,
     pub(crate) built_bytes: usize,
@@ -86,6 +88,7 @@ impl XHost {
             nodes,
             texts: Vec::new(),
             codes: Vec::new(),
+            modules: Vec::new(),
             building: Vec::new(),
             built_bytes: 0,
             shape,

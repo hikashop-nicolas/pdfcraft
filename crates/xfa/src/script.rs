@@ -856,6 +856,9 @@ pub fn script_objects_for(tpl: &Template, index: &ScriptObjectIndex, som: &str) 
             "Object.defineProperty(globalThis, {name:?}, {{ configurable: true, get: function () {{ return __xfa_build({key:?}, {name:?}); }}, set: function (v) {{ Object.defineProperty(globalThis, {name:?}, {{ value: v, writable: true, configurable: true }}); }} }});\n/* {hash:x} */\n{OBJECT_END}",
             name = o.name
         ));
+        if index.complete && index.unnamed.contains(&o.name) {
+            out.modules.push(key.clone());
+        }
         out.codes.push((key, at, Arc::clone(&o.text), true));
     }
     out
@@ -934,6 +937,9 @@ pub struct ScriptObjects {
     /// The code objects, by the key `__xfa_build` is called with: the SOM of their subform, their code, and whether the
     /// prelude makes a global of them (not for an outer object an inner one hides, nor a built-in's name).
     pub codes: Vec<(String, Option<String>, Arc<str>, bool)>,
+    /// The keys of the code objects no event script names (other objects may): modules that extend another object, built
+    /// once an object their code names is built, as Acrobat builds every object up front.
+    pub modules: Vec<String>,
 }
 
 /// The text of a script object that holds data the form reads: an XML literal.
@@ -968,6 +974,8 @@ pub const OBJECT_END: &str = "/*__xfa_object_end__*/\n";
 pub struct ScriptObjectIndex {
     all: Vec<(String, Option<String>, Arc<str>, bool)>,
     counts: HashMap<String, usize>,
+    /// Names of objects that no event script mentions.
+    unnamed: std::collections::HashSet<String>,
     /// Whether every object was read: past [`MAX_INDEXED_OBJECTS`] a name can't be known to be the only one of its kind.
     complete: bool,
 }
@@ -983,7 +991,22 @@ impl ScriptObjectIndex {
         for (name, _, _, _) in &index.all {
             *index.counts.entry(name.clone()).or_insert(0) += 1;
         }
+        index.unnamed = index.never_named(tpl);
         index
+    }
+
+    /// The object names no event script mentions (as a word, strings and comments included). Objects may: a main object that
+    /// lists its modules is itself built only by the scripts that name it.
+    fn never_named(&self, tpl: &Template) -> std::collections::HashSet<String> {
+        let mut left: std::collections::HashSet<String> = self.counts.keys().cloned().collect();
+        if !left.is_empty() {
+            each_script(tpl, &mut |text| {
+                for w in words(text) {
+                    left.remove(w);
+                }
+            });
+        }
+        left
     }
 
     fn add(&mut self, objects: &[ScriptObject], som: Option<&str>) {
@@ -1035,6 +1058,48 @@ impl ScriptObjectIndex {
                 _ => {}
             }
         }
+    }
+}
+
+/// The identifier-like words of `text` (`$` and `_` included), strings and comments not told apart.
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$')).filter(|w| !w.is_empty())
+}
+
+/// Calls `f` with the text of every event, calculate and validate script of `tpl`, page masters' included.
+fn each_script(tpl: &Template, f: &mut impl FnMut(&str)) {
+    fn field(fd: &Field, f: &mut impl FnMut(&str)) {
+        for s in fd.scripts.iter().chain(&fd.calculate).chain(&fd.validate) {
+            f(&s.text);
+        }
+    }
+    fn walk(nodes: &[Node], depth: usize, f: &mut impl FnMut(&str)) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        for n in nodes {
+            match n {
+                Node::Subform(sf) => {
+                    sf.scripts.iter().for_each(|s| f(&s.text));
+                    walk(&sf.children, depth + 1, f);
+                    if let Some(ps) = &sf.page_set {
+                        ps.areas.iter().for_each(|a| walk(&a.items, depth + 1, f));
+                    }
+                }
+                Node::Area(a) => walk(&a.children, depth + 1, f),
+                Node::Field(fd) => field(fd, f),
+                Node::ExclGroup(g) => {
+                    g.scripts.iter().for_each(|s| f(&s.text));
+                    g.fields.iter().for_each(|fd| field(fd, f));
+                }
+                Node::Draw(_) => {}
+            }
+        }
+    }
+    tpl.root.scripts.iter().for_each(|s| f(&s.text));
+    walk(&tpl.root.children, 1, f);
+    if let Some(ps) = &tpl.root.page_set {
+        ps.areas.iter().for_each(|a| walk(&a.items, 1, f));
     }
 }
 
@@ -1189,6 +1254,30 @@ mod script_object_tests {
 
     fn object(name: &str) -> ScriptObject {
         ScriptObject { name: name.into(), text: "function m() { return 1; }".into(), variable: false }
+    }
+
+    #[test]
+    fn an_object_no_event_script_names_is_a_module() {
+        use crate::model::{Field, Script};
+        let text = |name: &str, text: &str| ScriptObject { name: name.into(), text: text.into(), variable: false };
+        let script = Script { activity: "calculate".into(), text: "this.rawValue = NS.jForm.x.f() + calcs.sum();".into(), formcalc: false };
+        let field = Field { common: named("t"), calculate: Some(script), ..Default::default() };
+        let tpl = Template {
+            root: Subform {
+                common: named("form"),
+                script_objects: vec![
+                    text("NS", "var jForm = {};"),
+                    text("module_x", "NS.jForm.x = { f: function () { return 'ok'; } }; // module_x"),
+                    text("calcs", "function sum() { return helper.one(); }"),
+                    text("helper", "function one() { return 1; }"),
+                ],
+                children: vec![Node::Field(Box::new(field))],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // `helper` only another object names
+        assert_eq!(objects("form[0].t[0]", &tpl).modules, ["form[0]|module_x", "form[0]|helper"]);
     }
 
     fn named(name: &str) -> Common {

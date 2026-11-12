@@ -128,7 +128,7 @@ pub(crate) fn warm_up() {
 fn run_here(script: &str, event: &XfaEvent, doc: &XfaDoc, root: XfaNode, limits: Limits, started: &dyn Fn()) -> XfaOutcome {
     run_here_with(
         script,
-        ScriptCode { prelude: "", texts: Vec::new(), codes: Vec::new(), layout: Default::default(), shared: false },
+        ScriptCode { prelude: "", texts: Vec::new(), codes: Vec::new(), modules: Vec::new(), layout: Default::default(), shared: false },
         event,
         doc,
         root,
@@ -148,11 +148,12 @@ pub(crate) fn run_here_with(
     limits: Limits,
     started: &dyn Fn(),
 ) -> XfaOutcome {
-    let ScriptCode { prelude, texts, codes, layout, shared } = objects;
+    let ScriptCode { prelude, texts, codes, modules, layout, shared } = objects;
     warm_up();
     let mut host_state = XHost::new(root, &event.target, doc);
     host_state.texts = texts;
     host_state.codes = codes;
+    host_state.modules = modules;
     host_state.boxes = layout;
     let current = host_state.current;
     // The engine a session's earlier script left is used again while the form has the same structure: the script objects
@@ -249,6 +250,8 @@ pub(crate) struct ScriptCode<'a> {
     pub(crate) texts: Vec<(String, std::sync::Arc<str>)>,
     /// The code objects, by key, with the SOM of their subform.
     pub(crate) codes: Vec<(String, Option<String>, std::sync::Arc<str>, bool)>,
+    /// See [`crate::xfa_session::Script::modules`].
+    pub(crate) modules: Vec<String>,
     /// Where the form's objects were laid out.
     pub(crate) layout: std::sync::Arc<Vec<XfaBox>>,
     /// Whether the engine is the session's, kept for the scripts after this one.

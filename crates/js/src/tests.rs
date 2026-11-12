@@ -1745,6 +1745,7 @@ mod session {
             prelude: String::new(),
             texts: Vec::new(),
             codes: Vec::new(),
+            modules: Vec::new(),
             layout: Default::default(),
             source: source.into(),
             formcalc,
@@ -1891,9 +1892,22 @@ mod session {
         let mut sc = script("form1.value.f()", false, "form1[0].page1[0].total[0]", "calculate");
         sc.codes.push(("form1[0]|value".into(), Some("form1[0]".into()), "function f() { return 'value'; }".into(), false));
         assert_eq!(s.run(sc).result.as_deref(), Some("value"));
+        // an object declaring more names than any real one is refused rather than compiled for minutes
         let names: String = (0..100_000).map(|i| format!("var v{i};")).collect();
         let e = with_objects(&mut s, "Wide.v1", &[("Wide", None, &names)]).unwrap_err();
-        assert!(e.contains("pass 8 MiB"), "{e}");
+        assert!(e.contains("more than 2048"), "{e}");
+        // a module no event script names is built once the object it extends is
+        let mut s = XfaSession::new(XfaDoc { page_count: 1, ..Default::default() });
+        let mut sc = script("NS.jForm.x.f()", false, "form1[0].page1[0].total[0]", "calculate");
+        for (name, code) in [("NS", "var jForm = {};"), ("module_x", "NS.jForm.x = { f: function () { return 'ok'; } };")] {
+            let key = format!("form1[0]|{name}");
+            sc.prelude.push_str(&format!(
+                "Object.defineProperty(globalThis, {name:?}, {{ configurable: true, get: function () {{ return __xfa_build({key:?}, {name:?}); }} }});\n/*__xfa_object_end__*/\n"
+            ));
+            sc.codes.push((key, Some("form1[0]".into()), code.into(), true));
+        }
+        sc.modules.push("form1[0]|module_x".into());
+        assert_eq!(s.run(sc).result.as_deref(), Some("ok"));
         let e = with_objects(&mut s, "Deep.x", &[("Deep", None, &format!("var x = {}1;", "(".repeat(64_000)))]).unwrap_err();
         assert!(e.contains("nested too deeply"), "{e}");
         assert_eq!(s.dead(), None);

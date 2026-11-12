@@ -20,6 +20,10 @@ use crate::{arg, text};
 /// ones is stopped here rather than compiling them all.
 pub(crate) const MAX_BUILT_BYTES: usize = 8 << 20;
 
+/// The most names one object may declare at its top level: each becomes an accessor, which boa compiles in time growing with
+/// the square of their count. Real objects declare a few hundred at most.
+pub(crate) const MAX_MEMBERS: usize = 2048;
+
 thread_local! {
     /// The members read from each object's code, by a hash of the code: a form's scripts reach the same objects again and again.
     static MEMBERS: RefCell<HashMap<u64, Result<Arc<str>, String>>> = RefCell::new(HashMap::new());
@@ -36,7 +40,29 @@ pub(super) fn build(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
     }
     let desc = PropertyDescriptor::builder().value(value.clone()).writable(true).configurable(true).enumerable(false);
     ctx.global_object().define_property_or_throw(JsString::from(name.as_str()), desc, ctx)?;
+    extend(ctx, &key, &name);
     Ok(value)
+}
+
+/// Builds the modules whose code names `name`, now that it is built (one that fails is left out, as it was never run before).
+fn extend(ctx: &mut Context, key: &str, name: &str) {
+    let modules: Vec<String> = match host(ctx) {
+        Ok(h) => {
+            let h = h.borrow();
+            h.modules
+                .iter()
+                .filter(|m| m.as_str() != key)
+                .filter_map(|m| h.codes.iter().find(|c| c.0 == *m))
+                .filter(|c| c.2.split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$')).any(|w| w == name))
+                .map(|c| c.0.rsplit('|').next().unwrap_or("").to_string())
+                .collect()
+        }
+        Err(_) => return,
+    };
+    for module in modules {
+        // reading its global builds it, once: it is the object then
+        let _ = ctx.global_object().get(JsString::from(module.as_str()), ctx);
+    }
 }
 
 /// Code object `key` built for a script, its global left as it is: one named like a built-in (`form1.Number`).
@@ -134,6 +160,9 @@ fn read_members(text: &str) -> Result<Arc<str>, String> {
                 names.push(name);
             }
         }
+    }
+    if names.len() > MAX_MEMBERS {
+        return Err(format!("it declares {} names at its top level, more than {MAX_MEMBERS}", names.len()));
     }
     names.sort();
     let member = |n: &String| {
