@@ -245,6 +245,15 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
         (n.name.clone(), n.som.clone(), n.kind, n.value.clone(), n.presence.clone(), n.access.clone(), n.index, n.parent, n.children.clone())
     };
     let (name, som, kind, value, presence, access, index, parent, children) = snapshot;
+    // A script object the subform declares comes first, as a named child does (`form1.value` when it declares `value`).
+    let declared = {
+        let h = host(ctx)?.borrow();
+        let k = format!("{som}|{key}");
+        key != IDX && h.codes.iter().any(|c| c.0 == k)
+    };
+    if declared {
+        return script_object_named(ctx, idx, &key);
+    }
     Ok(match key.as_str() {
         IDX => JsValue::from(idx as f64),
         // where the object was laid out, as a measurement

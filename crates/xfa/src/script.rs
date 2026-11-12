@@ -979,7 +979,7 @@ impl ScriptObjectIndex {
     /// The script objects of `tpl`, with the SOM of the subform or page area declaring each (first instances).
     pub fn of(tpl: &Template) -> Self {
         let mut index = ScriptObjectIndex { complete: true, ..Default::default() };
-        index.subform(&tpl.root, None, 0);
+        index.subform(&tpl.root, None, 0, 0);
         for (name, _, _, _) in &index.all {
             *index.counts.entry(name.clone()).or_insert(0) += 1;
         }
@@ -996,13 +996,14 @@ impl ScriptObjectIndex {
         }
     }
 
-    fn subform(&mut self, sf: &Subform, parent: Option<&str>, depth: usize) {
+    /// `sf`, the `at`-th of its name among its siblings (the index the live form gives its first instance).
+    fn subform(&mut self, sf: &Subform, parent: Option<&str>, at: usize, depth: usize) {
         if depth > MAX_DEPTH {
             self.complete = false;
             return;
         }
         let som = match (&sf.common.name, parent) {
-            (Some(n), Some(p)) => Some(format!("{p}.{n}[0]")),
+            (Some(n), Some(p)) => Some(format!("{p}.{n}[{at}]")),
             (Some(n), None) if depth == 0 => Some(format!("{n}[0]")),
             (None, p) => p.map(str::to_string),
             _ => None,
@@ -1020,12 +1021,13 @@ impl ScriptObjectIndex {
     }
 
     fn nodes(&mut self, nodes: &[Node], som: Option<&str>, depth: usize) {
-        for n in nodes {
+        let sibs = SomIndices::of(nodes);
+        for (i, n) in nodes.iter().enumerate() {
             match n {
-                Node::Subform(c) => self.subform(c, som, depth + 1),
+                Node::Subform(c) => self.subform(c, som, sibs.at(i), depth + 1),
                 Node::Area(a) if depth < MAX_DEPTH => {
                     let inner = match (&a.common.name, som) {
-                        (Some(n), Some(p)) => Some(format!("{p}.{n}[0]")),
+                        (Some(n), Some(p)) => Some(format!("{p}.{n}[{}]", sibs.at(i))),
                         _ => som.map(str::to_string),
                     };
                     self.nodes(&a.children, inner.as_deref(), depth + 1);
@@ -1088,8 +1090,10 @@ fn reachable(tpl: &Template, index: &ScriptObjectIndex, som: &str) -> Vec<Reach>
             let name = part.split('[').next().unwrap_or(part);
             let Some(step) = som_step(nodes, name, som_index(part).unwrap_or(0)) else { break };
             let here = at.as_ref().map_or_else(|| part.to_string(), |p| format!("{p}.{part}"));
+            // an unnamed subform takes no part of the SOM (the live form gives it its parent's): its objects go with the nearest
+            // named subform above it, which is `this` for them and reaches them as children
             for sf in step.unnamed {
-                chain.push((&sf.script_objects, None));
+                chain.push((&sf.script_objects, at.clone()));
             }
             if let Some(sf) = step.named {
                 chain.push((&sf.script_objects, Some(here.clone())));
@@ -1210,7 +1214,7 @@ mod script_object_tests {
         let calcs: Vec<_> = all.codes.iter().filter(|c| c.0.ends_with("|Calc")).map(|c| (c.0.as_str(), c.3)).collect();
         assert_eq!(calcs, [("form[0]|Calc", false), ("form[0].page[0]|Calc", true)]);
         assert!(all.codes.iter().any(|c| c.0 == "form[0].page[0]|Number" && !c.3) && !all.prelude.contains("\"Number\""), "{:?}", all.codes);
-        assert!(keys("form[0].page[0].total[0]", &tpl).iter().any(|k| k.ends_with("|Mid")));
+        assert!(keys("form[0].page[0].total[0]", &tpl).contains(&"form[0].page[0]|Mid".into()));
         // page masters reach their page area's (with its page's SOM) and the page set's objects
         tpl.root.page_set = Some(PageSet {
             script_objects: vec![object("sobModeCheck")],
@@ -1235,7 +1239,7 @@ mod script_object_tests {
                 common: named("form"),
                 children: vec![
                     sub("page", vec![calc("var first = 1;")], vec![]),
-                    sub("page", vec![calc("var second = 2;")], vec![]),
+                    sub("page", vec![calc("var second = 2;"), object("Only")], vec![]),
                     Node::Area(Box::new(Area { common: named("outer"), children: vec![sub("inner", vec![object("Inner")], vec![])] })),
                 ],
                 ..Default::default()
@@ -1246,6 +1250,7 @@ mod script_object_tests {
         assert_eq!(calc_text("form[0].page[0].f[0]").as_deref(), Some("var first = 1;"));
         assert_eq!(calc_text("form[0].page[1].f[0]").as_deref(), Some("var second = 2;"));
         assert!(keys("form[0].outer[0].inner[0].f[0]", &tpl).contains(&"form[0].outer[0].inner[0]|Inner".into()));
+        assert!(keys("form[0]", &tpl).contains(&"form[0].page[1]|Only".into()));
         let mut big = tpl.clone();
         big.root.script_objects = (0..4100).map(|i| object(&format!("o{i}"))).collect();
         assert!(!keys("form[0]", &big).iter().any(|k| k.ends_with("|Inner")));

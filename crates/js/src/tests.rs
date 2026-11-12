@@ -1888,6 +1888,12 @@ mod session {
         sc.codes.push(("form1[0].page1[0]|Hid".into(), Some("form1[0].page1[0]".into()), "var who = 'inner';".into(), true));
         sc.codes.push(("form1[0]|layout".into(), Some("form1[0]".into()), "function f() { return 'declared'; }".into(), false));
         assert_eq!(s.run(sc).result.as_deref(), Some("inner,outer,declared"));
+        let mut sc = script("form1.value.f()", false, "form1[0].page1[0].total[0]", "calculate");
+        sc.codes.push(("form1[0]|value".into(), Some("form1[0]".into()), "function f() { return 'value'; }".into(), false));
+        assert_eq!(s.run(sc).result.as_deref(), Some("value"));
+        let names: String = (0..100_000).map(|i| format!("var v{i};")).collect();
+        let e = with_objects(&mut s, "Wide.v1", &[("Wide", None, &names)]).unwrap_err();
+        assert!(e.contains("pass 8 MiB"), "{e}");
         let e = with_objects(&mut s, "Deep.x", &[("Deep", None, &format!("var x = {}1;", "(".repeat(64_000)))]).unwrap_err();
         assert!(e.contains("nested too deeply"), "{e}");
         assert_eq!(s.dead(), None);

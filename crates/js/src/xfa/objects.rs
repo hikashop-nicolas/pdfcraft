@@ -74,6 +74,14 @@ fn compile(ctx: &mut Context, code: &str, this: Option<usize>) -> Result<JsValue
         return Err(why);
     }
     let members = members_of(code)?;
+    // the members it exports are code compiled too: a short object declaring many names comes to more than its text
+    {
+        let mut h = host(ctx).map_err(|e| e.to_string())?.borrow_mut();
+        h.built_bytes = h.built_bytes.saturating_add(members.len());
+        if h.built_bytes > MAX_BUILT_BYTES {
+            return Err(format!("the script's objects pass {} MiB", MAX_BUILT_BYTES >> 20));
+        }
+    }
     let wrapped = format!("(function () {{\n{code}\n;return (function (o) {{ {members} return o; }})({{}});\n}})");
     let f = ctx.eval(Source::from_bytes(wrapped.as_bytes())).map_err(|e| e.to_string())?;
     let this = match this {
