@@ -587,7 +587,7 @@ fn parse_script(s: XmlNode, activity: &str) -> Script {
 
 /// `<event activity="…"><script>…</script></event>` children.
 /// The JavaScript objects under `<variables>`: `<script name="LOVUtils" contentType="application/x-javascript">`.
-fn parse_script_objects(n: XmlNode) -> Vec<ScriptObject> {
+fn parse_script_objects(n: XmlNode, warnings: &mut Vec<String>) -> Vec<ScriptObject> {
     let mut out = Vec::new();
     for vars in children(n, "variables").take(8) {
         for s in children(vars, "script").take(64) {
@@ -595,21 +595,35 @@ fn parse_script_objects(n: XmlNode) -> Vec<ScriptObject> {
             if !s.attribute("contentType").unwrap_or("").to_ascii_lowercase().contains("javascript") {
                 continue;
             }
-            let text = text_of(s);
-            if !text.trim().is_empty() {
-                out.push(ScriptObject { name: name.to_string(), text, variable: false });
+            // one longer than the bound is left out, rather than cut into code that does not parse
+            let mut text = String::new();
+            let mut whole = true;
+            for t in s.descendants().filter(|d| d.is_text()).filter_map(|d| d.text()) {
+                if text.len() + t.len() > MAX_SCRIPT_OBJECT_TEXT {
+                    whole = false;
+                    break;
+                }
+                text.push_str(t);
+            }
+            if !whole {
+                warnings.push(format!("the script object {name} is larger than {} MiB; it is left out", MAX_SCRIPT_OBJECT_TEXT >> 20));
+            } else if !text.trim().is_empty() {
+                out.push(ScriptObject { name: name.to_string(), text: text.into(), variable: false });
             }
         }
         for kind in ["text", "integer", "float", "decimal", "boolean", "date", "time", "dateTime"] {
             for v in children(vars, kind).take(64) {
                 if let Some(name) = v.attribute("name").map(str::trim).filter(|n| is_js_identifier(n)) {
-                    out.push(ScriptObject { name: name.to_string(), text: text_of(v).trim().to_string(), variable: true });
+                    out.push(ScriptObject { name: name.to_string(), text: text_of(v).trim().into(), variable: true });
                 }
             }
         }
     }
     out
 }
+
+/// The longest script object read (a form's libraries reach a few hundred KiB).
+pub const MAX_SCRIPT_OBJECT_TEXT: usize = 2 << 20;
 
 fn is_js_identifier(s: &str) -> bool {
     let mut chars = s.chars();
@@ -642,6 +656,7 @@ fn parse_occur(n: Option<XmlNode>) -> Occur {
 
 fn parse_page_set(n: XmlNode, warnings: &mut Vec<String>, depth: usize) -> PageSet {
     let mut areas = Vec::new();
+    let mut script_objects = parse_script_objects(n, warnings);
     for pa in children(n, "pageArea") {
         let medium = child(pa, "medium");
         let short = medium.and_then(|m| attr_measure(m, "short")).unwrap_or(612.0).clamp(1.0, 14_400.0);
@@ -677,15 +692,18 @@ fn parse_page_set(n: XmlNode, warnings: &mut Vec<String>, depth: usize) -> PageS
         // would exhaust it, and demand a page for every master).
         let occur = child(pa, "occur").map(|o| parse_occur(Some(o)));
         let (occur_min, occur_max) = occur.map_or((0, None), |o| (o.min, o.max));
-        areas.push(PageArea { name: pa.attribute("name").map(str::to_string), width, height, content, items, occur_max, occur_min });
+        let script_objects = parse_script_objects(pa, warnings);
+        areas.push(PageArea { name: pa.attribute("name").map(str::to_string), width, height, content, items, occur_max, occur_min, script_objects });
     }
     // Nested page sets: take their areas too.
     for ps in children(n, "pageSet") {
         if depth < MAX_DEPTH {
-            areas.extend(parse_page_set(ps, warnings, depth + 1).areas);
+            let inner = parse_page_set(ps, warnings, depth + 1);
+            areas.extend(inner.areas);
+            script_objects.extend(inner.script_objects);
         }
     }
-    PageSet { areas }
+    PageSet { areas, script_objects }
 }
 
 fn parse_subform(n: XmlNode, warnings: &mut Vec<String>, depth: usize) -> Subform {
@@ -712,7 +730,7 @@ fn parse_subform(n: XmlNode, warnings: &mut Vec<String>, depth: usize) -> Subfor
         layout: Layout::parse(n.attribute("layout")),
         children: children_out,
         scripts: parse_events(n),
-        script_objects: parse_script_objects(n),
+        script_objects: parse_script_objects(n, warnings),
         page_set,
         occur: parse_occur(child(n, "occur")),
         break_before_page: break_to_page("breakBefore")

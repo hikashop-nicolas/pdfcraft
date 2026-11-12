@@ -16,10 +16,10 @@ mod common;
 mod strip;
 
 pub use common::jpeg_size;
-pub(crate) use common::{path, rounded};
 use common::{
     all_faces, content_hash, empty_form, hex32, jpeg_info, js_action, js_string, n, parse_hex32, rgb, rgb_array, standard_font, state_name,
 };
+pub(crate) use common::{path, rounded};
 pub(crate) use strip::USAGE_RIGHTS_REMOVED;
 use strip::drop_usage_rights;
 pub use strip::{Stripped, XfaShape, existing_layout, strip, xfa_shape};

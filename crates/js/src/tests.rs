@@ -1744,6 +1744,7 @@ mod session {
         Script {
             prelude: String::new(),
             texts: Vec::new(),
+            codes: Vec::new(),
             layout: Default::default(),
             source: source.into(),
             formcalc,
@@ -1833,6 +1834,48 @@ mod session {
         unused.prelude = "Object.defineProperty(globalThis, \"Bad\", { value: (function () { ;return { ;\n/*__xfa_object_end__*/\n".into();
         assert_eq!(s.run(unused).result.as_deref(), Some("1"));
         assert_eq!(s.run(script("1 + 1", false, "form1[0].page1[0].total[0]", "calculate")).result.as_deref(), Some("2"));
+    }
+
+    /// `source` on `total` with the code objects `objects` ((name, SOM of its subform, code)), defined as the template's
+    /// prelude defines them: its result, or its error.
+    fn with_objects(s: &mut XfaSession, source: &str, objects: &[(&str, Option<&str>, &str)]) -> Result<String, String> {
+        let mut sc = script(source, false, "form1[0].page1[0].total[0]", "calculate");
+        for (name, som, code) in objects {
+            let key = format!("{}|{name}", som.unwrap_or(""));
+            sc.prelude.push_str(&format!(
+                "Object.defineProperty(globalThis, {name:?}, {{ configurable: true, get: function () {{ return __xfa_build({key:?}, {name:?}); }} }});\n/* {} */\n/*__xfa_object_end__*/\n",
+                code.len()
+            ));
+            sc.codes.push((key, som.map(str::to_string), (*code).into()));
+        }
+        let o = s.run(sc);
+        o.error.map_or(Ok(o.result.unwrap_or_default()), Err)
+    }
+
+    /// A code object is built the first time a script reads it, with every top-level member its code declares (a quote in a
+    /// regular expression hides nothing, nested locals are not members), whatever order the objects were declared in, `this`
+    /// being its subform. One that does not load fails only the scripts that use it. Built once, it keeps its state for the
+    /// session's later scripts.
+    #[test]
+    fn code_objects_are_built_when_first_read_and_kept() {
+        let mut s = XfaSession::new(XfaDoc { page_count: 1, ..Default::default() });
+        let regex = [("U", Some("form1[0]"), "function a(v) { return /^[a-z']+$/.test(v); }\nfunction b() { return 1; }")];
+        assert_eq!(with_objects(&mut s, "U.b() + U.a('it\\'s')", &regex).as_deref(), Ok("2"));
+        let many: String = (0..300).map(|i| format!("function f{i}() {{ var local{i} = {i}; return local{i}; }}\n")).collect();
+        assert_eq!(with_objects(&mut s, "Many.f299() + ',' + typeof Many.local1", &[("Many", None, &many)]).as_deref(), Ok("299,undefined"));
+        let order = [("A", None, "var max = B.mb(5);"), ("B", None, "function mb(n) { return n * 1048576; }")];
+        assert_eq!(with_objects(&mut s, "A.max", &order).as_deref(), Ok("5242880"));
+        let lov = [("LOV", None, "var list = <items><item/></items>;"), ("messages", None, "var hi = 'hi';")];
+        assert_eq!(with_objects(&mut s, "messages.hi", &lov).as_deref(), Ok("hi"));
+        let e = with_objects(&mut s, "LOV.list", &lov).unwrap_err();
+        assert!(e.contains("script object LOV did not load"), "{e}");
+        // its subform is `this`, and it holds what one script left for the next
+        let state = [("calcs", Some("form1[0]"), "var n = 0; function inc() { return ++n; }\nvar who = this.name;")];
+        assert_eq!(with_objects(&mut s, "calcs.inc() + ',' + calcs.who", &state).as_deref(), Ok("1,form1"));
+        assert_eq!(with_objects(&mut s, "form1.calcs.inc()", &state).as_deref(), Ok("2"));
+        let e = with_objects(&mut s, "Deep.x", &[("Deep", None, &format!("var x = {}1;", "(".repeat(64_000)))]).unwrap_err();
+        assert!(e.contains("nested too deeply"), "{e}");
+        assert_eq!(s.dead(), None);
     }
 
     /// What a form's scripts reach for that the host only stands in for: the SOM shortcuts, the lists and

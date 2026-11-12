@@ -54,8 +54,8 @@ pub use model::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use run::SCRIPT_STACK;
-use run::{refuse, refuse_nesting};
 pub(crate) use run::{CheckedCodeFromStrings, MAX_SCRIPT_BYTES};
+use run::{refuse, refuse_nesting};
 pub use run::{run, run_shared};
 
 pub mod formcalc;

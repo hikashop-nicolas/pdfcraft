@@ -22,6 +22,7 @@ mod host;
 mod instances;
 mod model;
 mod nodes;
+mod objects;
 mod run;
 
 pub(crate) use host::{HNode, XHost};

@@ -1,6 +1,8 @@
+use std::sync::Arc;
+
 use super::model::{
-    XfaBox, MAX_ALERTS, MAX_CONSOLE, MAX_DEPTH, MAX_EFFECTS, MAX_NODES, MAX_PAYLOAD, MAX_VALUE, XfaDoc, XfaEffect, XfaKind, XfaNode, clip, clip_value,
-    effect_key, payload,
+    MAX_ALERTS, MAX_CONSOLE, MAX_DEPTH, MAX_EFFECTS, MAX_NODES, MAX_PAYLOAD, MAX_VALUE, XfaBox, XfaDoc, XfaEffect, XfaKind, XfaNode, clip,
+    clip_value, effect_key, payload,
 };
 use super::{Context, HashMap, JsResult, Message, RefCell, error};
 
@@ -29,7 +31,12 @@ pub(crate) struct HNode {
 pub(crate) struct XHost {
     pub(crate) nodes: Vec<HNode>,
     /// The text of the form's data script objects, by name (`__xfa_text`).
-    pub(crate) texts: Vec<(String, String)>,
+    pub(crate) texts: Vec<(String, Arc<str>)>,
+    /// The code script objects, by the key `__xfa_build` is called with, with the SOM of their subform ([`super::objects`]).
+    pub(crate) codes: Vec<(String, Option<String>, Arc<str>)>,
+    /// The code objects being built, against cycles; and the bytes of code built for the script ([`super::objects::MAX_BUILT_BYTES`]).
+    pub(crate) building: Vec<String>,
+    pub(crate) built_bytes: usize,
     /// A fingerprint of the form's structure (its objects and their paths, not their values): what a script engine kept
     /// across scripts is good for as long as it is the same.
     pub(crate) shape: u64,
@@ -78,6 +85,9 @@ impl XHost {
         XHost {
             nodes,
             texts: Vec::new(),
+            codes: Vec::new(),
+            building: Vec::new(),
+            built_bytes: 0,
             shape,
             boxes: Default::default(),
             effects: Vec::new(),

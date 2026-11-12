@@ -3,6 +3,7 @@
 //! survive undo and reopening), and laying the form out again after scripts changed it.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use pdfcraft_cos::{Dict, Document, Object, PdfString};
 
@@ -802,67 +803,14 @@ pub fn data_of(doc: &Document) -> Option<DataNode> {
     crate::read_packets(doc).ok().flatten().and_then(|p| parse_datasets(&p.xdp))
 }
 
-/// JavaScript that defines the script objects a script at `som` calls by name: `LOVUtils.check(x)` finds the
-/// `<variables><script name="LOVUtils">` of the subform the script sits in, or of one above it. Only the objects
-/// the script uses (and those they use) are defined, since every script runs in a fresh context. Empty when it uses none.
-/// `Err` when the objects it needs add up to more than [`MAX_SCRIPT_OBJECT_BYTES`].
-pub fn script_objects_for(tpl: &Template, som: &str, script: &str) -> Result<ScriptObjects, String> {
-    // The subforms from the root down to the one holding the script, as the SOM names them (unnamed ones in between too).
-    let mut chain: Vec<&Subform> = vec![&tpl.root];
-    for part in som.split('.').skip(1) {
-        let name = part.split('[').next().unwrap_or(part);
-        let Some(&last) = chain.last() else { break };
-        let mut found = Vec::new();
-        if !subform_path(&last.children, name, &mut found) {
-            break;
-        }
-        chain.extend(found);
-    }
-    // Inner objects hide outer ones of the same name.
-    let mut objects: Vec<&ScriptObject> = Vec::new();
-    for sf in &chain {
-        for o in sf.script_objects.iter() {
-            objects.retain(|x| x.name != o.name);
-            objects.push(o);
-        }
-    }
-    if objects.is_empty() {
-        return Ok(ScriptObjects::default());
-    }
-    let mentions = |text: &str, name: &str| -> bool {
-        text.match_indices(name).any(|(i, _)| {
-            let before = text[..i].chars().next_back();
-            let after = text[i + name.len()..].chars().next();
-            let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_' || c == '$');
-            !word(before) && !word(after)
-        })
-    };
-    let mut used: Vec<&ScriptObject> = Vec::new();
-    let mut bytes = 0usize;
-    let mut texts = vec![script];
-    while let Some(text) = texts.pop() {
-        for o in &objects {
-            if !used.iter().any(|u| std::ptr::eq(*u, *o)) && mentions(text, &o.name) {
-                bytes = bytes.saturating_add(o.text.len());
-                if bytes > MAX_SCRIPT_OBJECT_BYTES {
-                    return Err(format!(
-                        "the form's script objects are too large ({} KiB; the limit is {} KiB)",
-                        bytes / 1024,
-                        MAX_SCRIPT_OBJECT_BYTES / 1024
-                    ));
-                }
-                used.push(o);
-                // data is not read for the names it mentions
-                if !is_data(o) {
-                    texts.push(&o.text);
-                }
-            }
-        }
-    }
-    // Defined in the order they were declared.
-    used.sort_by_key(|u| objects.iter().position(|o| std::ptr::eq(*o, *u)));
+/// JavaScript that defines the script objects a script at `som` can reach by name: those of the subform it sits in and of
+/// every one above it, an inner object hiding an outer one of the same name (XFA 3.3 chapter 10), and for a page master's
+/// script those of its page area and of the page set. An object no scope reaches whose name is the form's only one of that
+/// name is reached too. A code object is a global whose getter builds it (`__xfa_build`) the first time it is read, so one
+/// can use another declared after it and one that does not load fails only the scripts that use it.
+pub fn script_objects_for(tpl: &Template, som: &str) -> ScriptObjects {
     let mut out = ScriptObjects::default();
-    for o in used {
+    for (o, at) in reachable(tpl, som) {
         // a variable is an object with its value
         if o.variable {
             let value = js_string_literal(&o.text);
@@ -879,18 +827,188 @@ pub fn script_objects_for(tpl: &Template, som: &str, script: &str) -> Result<Scr
                 "Object.defineProperty(globalThis, {:?}, {{ get: function () {{ var t = __xfa_text({:?}); return {{ value: t, rawValue: t }}; }}, configurable: true }});\n{OBJECT_END}",
                 o.name, o.name
             ));
-            out.texts.push((o.name.clone(), o.text.clone()));
+            out.texts.push((o.name.clone(), Arc::clone(&o.text)));
             continue;
         }
-        let names = declared_names(&o.text);
-        let members: Vec<String> = names.iter().map(|n| format!("{n}: typeof {n} === 'undefined' ? undefined : {n}")).collect();
-        // defined on the global object so an object named like a host global (util, say) replaces it
+        // an ECMAScript built-in keeps its meaning for the form's scripts
+        if BUILT_INS.contains(&o.name.as_str()) {
+            continue;
+        }
+        let key = format!("{}|{}", at.as_deref().unwrap_or(""), o.name);
+        let hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            o.text.hash(&mut h);
+            h.finish()
+        };
+        // defined on the global object so an object named like a host global (util, say) replaces it; the hash makes the
+        // definition change with the code, so an engine kept between scripts defines it again then
         out.prelude.push_str(&format!(
-            "Object.defineProperty(globalThis, {:?}, {{ value: (function () {{\n{}\n;return {{ {} }};\n}})(), writable: true, configurable: true }});\n{OBJECT_END}",
-            o.name, o.text, members.join(", ")
+            "Object.defineProperty(globalThis, {name:?}, {{ configurable: true, get: function () {{ return __xfa_build({key:?}, {name:?}); }}, set: function (v) {{ Object.defineProperty(globalThis, {name:?}, {{ value: v, writable: true, configurable: true }}); }} }});\n/* {hash:x} */\n{OBJECT_END}",
+            name = o.name
         ));
+        out.codes.push((key, at, Arc::clone(&o.text)));
     }
-    Ok(out)
+    out
+}
+
+/// Global names a script object does not take over.
+const BUILT_INS: &[&str] = &[
+    "Object",
+    "Function",
+    "Array",
+    "Number",
+    "Boolean",
+    "String",
+    "Symbol",
+    "BigInt",
+    "Date",
+    "RegExp",
+    "Promise",
+    "Proxy",
+    "Reflect",
+    "JSON",
+    "Math",
+    "Intl",
+    "Map",
+    "Set",
+    "WeakMap",
+    "WeakSet",
+    "WeakRef",
+    "Error",
+    "EvalError",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "TypeError",
+    "URIError",
+    "AggregateError",
+    "ArrayBuffer",
+    "DataView",
+    "Atomics",
+    "Int8Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "Int16Array",
+    "Uint16Array",
+    "Int32Array",
+    "Uint32Array",
+    "Float32Array",
+    "Float64Array",
+    "BigInt64Array",
+    "BigUint64Array",
+    "parseInt",
+    "parseFloat",
+    "isNaN",
+    "isFinite",
+    "decodeURI",
+    "decodeURIComponent",
+    "encodeURI",
+    "encodeURIComponent",
+    "escape",
+    "unescape",
+    "eval",
+    "globalThis",
+    "undefined",
+    "NaN",
+    "Infinity",
+    "xfa",
+    "event",
+];
+
+/// The objects a script at `som` reaches, inner ones hiding outer ones, each with the SOM of its subform (`None` for an
+/// unnamed one or a page set), then the form's objects of a name used once that no scope reaches.
+fn reachable<'a>(tpl: &'a Template, som: &str) -> Vec<(&'a ScriptObject, Option<String>)> {
+    let mut parts = som.split('.');
+    let first = parts.next().unwrap_or("");
+    let first_name = first.split('[').next().unwrap_or(first);
+    let mut chain: Vec<(&[ScriptObject], Option<String>)> = Vec::new();
+    let root_som = tpl.root.common.name.as_deref().map(|n| format!("{n}[0]"));
+    chain.push((&tpl.root.script_objects, root_som.clone()));
+    let mut nodes: &[Node] = &tpl.root.children;
+    let mut at = root_som;
+    let mut walk = true;
+    if tpl.root.common.name.as_deref() != Some(first_name) {
+        // a page master's script: `Page1[0].button[0]`, or `#pageArea[2].button[0]` for an unnamed area
+        walk = false;
+        if let Some(ps) = &tpl.root.page_set {
+            chain.push((&ps.script_objects, None));
+            let area = match first_name {
+                "#pageArea" => first.split('[').nth(1).and_then(|i| i.trim_end_matches(']').parse::<usize>().ok()).and_then(|i| ps.areas.get(i)),
+                name => ps.areas.iter().find(|a| a.name.as_deref() == Some(name)),
+            };
+            if let Some(area) = area {
+                chain.push((&area.script_objects, None));
+                nodes = &area.items;
+                at = Some(first.to_string());
+                walk = true;
+            }
+        }
+    }
+    if walk {
+        for part in parts {
+            let name = part.split('[').next().unwrap_or(part);
+            let mut found = Vec::new();
+            if !subform_path(nodes, name, &mut found) {
+                break;
+            }
+            let Some(&last) = found.last() else { break };
+            // unnamed subforms on the way take no part of the SOM
+            let som = at.as_ref().map_or_else(|| part.to_string(), |p| format!("{p}.{part}"));
+            for sf in &found[..found.len() - 1] {
+                chain.push((&sf.script_objects, None));
+            }
+            chain.push((&last.script_objects, Some(som.clone())));
+            nodes = &last.children;
+            at = Some(som);
+        }
+    }
+    let mut out: Vec<(&ScriptObject, Option<String>)> = Vec::new();
+    for (objects, som) in chain {
+        for o in objects {
+            out.retain(|(x, _)| x.name != o.name);
+            out.push((o, som.clone()));
+        }
+    }
+    let mut all: Vec<(&ScriptObject, Option<String>)> = Vec::new();
+    every_object(&tpl.root, None, &mut all, 0);
+    for (o, som) in &all {
+        if !out.iter().any(|(x, _)| x.name == o.name) && all.iter().filter(|(x, _)| x.name == o.name).count() == 1 {
+            out.push((o, som.clone()));
+        }
+    }
+    out
+}
+
+/// Every script object of the form, with the SOM of its subform (first instances), [`MAX_DEPTH`] subforms down at most.
+fn every_object<'a>(sf: &'a Subform, parent: Option<&str>, out: &mut Vec<(&'a ScriptObject, Option<String>)>, depth: usize) {
+    if depth > MAX_DEPTH || out.len() > 4096 {
+        return;
+    }
+    let som = match (&sf.common.name, parent) {
+        (Some(n), Some(p)) => Some(format!("{p}.{n}[0]")),
+        (Some(n), None) if depth == 0 => Some(format!("{n}[0]")),
+        (None, p) => p.map(str::to_string),
+        _ => None,
+    };
+    out.extend(sf.script_objects.iter().map(|o| (o, som.clone())));
+    fn walk<'a>(nodes: &'a [Node], som: Option<&str>, out: &mut Vec<(&'a ScriptObject, Option<String>)>, depth: usize) {
+        for n in nodes {
+            match n {
+                Node::Subform(c) => every_object(c, som, out, depth + 1),
+                Node::Area(a) if depth < MAX_DEPTH => walk(&a.children, som, out, depth + 1),
+                _ => {}
+            }
+        }
+    }
+    walk(&sf.children, som.as_deref(), out, depth);
+    if let Some(ps) = &sf.page_set {
+        out.extend(ps.script_objects.iter().map(|o| (o, None)));
+        for a in &ps.areas {
+            out.extend(a.script_objects.iter().map(|o| (o, None)));
+            walk(&a.items, None, out, depth);
+        }
+    }
 }
 
 /// What a script's script objects come to: the JavaScript that defines them, and the text of the ones that are data (read
@@ -898,7 +1016,9 @@ pub fn script_objects_for(tpl: &Template, som: &str, script: &str) -> Result<Scr
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScriptObjects {
     pub prelude: String,
-    pub texts: Vec<(String, String)>,
+    pub texts: Vec<(String, Arc<str>)>,
+    /// The code objects, by the key `__xfa_build` is called with: the SOM of their subform and their code.
+    pub codes: Vec<(String, Option<String>, Arc<str>)>,
 }
 
 /// A script object that holds data the form reads: a variable, or an XML literal.
@@ -927,145 +1047,6 @@ fn js_string_literal(text: &str) -> String {
 /// Ends each script object in the text [`script_objects_for`] returns, so one that does not load is skipped on its own.
 pub const OBJECT_END: &str = "/*__xfa_object_end__*/\n";
 
-/// The most the script objects a script needs may add up to.
-pub const MAX_SCRIPT_OBJECT_BYTES: usize = 2 * 1024 * 1024;
-
-/// The functions and variables a script declares at its top level or below (`function f`, `var v`, `let l`, `const c`), found by
-/// reading the code without its comments and strings.
-fn declared_names(text: &str) -> Vec<String> {
-    const RESERVED: &[&str] = &[
-        "function",
-        "var",
-        "let",
-        "const",
-        "if",
-        "else",
-        "for",
-        "while",
-        "do",
-        "switch",
-        "case",
-        "default",
-        "return",
-        "break",
-        "continue",
-        "new",
-        "delete",
-        "typeof",
-        "void",
-        "in",
-        "instanceof",
-        "this",
-        "null",
-        "true",
-        "false",
-        "try",
-        "catch",
-        "finally",
-        "throw",
-        "with",
-        "class",
-        "extends",
-        "super",
-        "yield",
-        "await",
-        "undefined",
-        "arguments",
-        "eval",
-    ];
-    let b = text.as_bytes();
-    let mut names: Vec<String> = Vec::new();
-    let mut i = 0;
-    let mut declaring = false;
-    // inside a `var a = 1, b = f(2, 3);` list: the bracket depth it sits at, so a comma at that depth names the next one
-    let (mut depth, mut list): (i32, Option<i32>) = (0, None);
-    // the last byte of code before this one: comments and whitespace do not count
-    let mut last: Option<u8> = None;
-    while i < b.len() && names.len() < 256 {
-        let c = b[i];
-        match c {
-            b'/' if b.get(i + 1) == Some(&b'/') => {
-                while i < b.len() && b[i] != b'\n' {
-                    i += 1;
-                }
-            }
-            b'/' if b.get(i + 1) == Some(&b'*') => {
-                i += 2;
-                while i < b.len() && !b[i..].starts_with(b"*/") {
-                    i += 1;
-                }
-                i += 2;
-            }
-            // a regular expression literal (after an operator or opening bracket): its quotes and brackets are not code
-            b'/' if last.is_none_or(|p| b"=(,:[!&|?{};".contains(&p)) => {
-                i += 1;
-                let mut class = false;
-                while i < b.len() && b[i] != b'\n' && (class || b[i] != b'/') {
-                    match b[i] {
-                        b'\\' => i += 1,
-                        b'[' => class = true,
-                        b']' => class = false,
-                        _ => {}
-                    }
-                    i += 1;
-                }
-                i += 1;
-                declaring = false;
-                last = Some(b'/');
-            }
-            b'\'' | b'"' | b'`' => {
-                i += 1;
-                while i < b.len() && b[i] != c {
-                    i += if b[i] == b'\\' { 2 } else { 1 };
-                }
-                i += 1;
-                declaring = false;
-                last = Some(b'"');
-            }
-            c if c.is_ascii_alphabetic() || c == b'_' || c == b'$' => {
-                let start = i;
-                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'$') {
-                    i += 1;
-                }
-                let word = &text[start..i];
-                // `a.function` or `x.var` is a property, not a declaration
-                let after_dot = last == Some(b'.');
-                last = Some(b'a');
-                if declaring && !RESERVED.contains(&word) && !after_dot {
-                    if !names.iter().any(|n| n == word) && word.len() < 64 {
-                        names.push(word.to_string());
-                    }
-                    declaring = false;
-                } else {
-                    declaring = !after_dot && matches!(word, "function" | "var" | "let" | "const");
-                    if declaring {
-                        list = (word != "function").then_some(depth);
-                    }
-                }
-            }
-            c if c.is_ascii_whitespace() || c == b'*' => i += 1,
-            c => {
-                declaring = false;
-                last = Some(c);
-                match c {
-                    b'(' | b'[' | b'{' => depth = depth.saturating_add(1),
-                    b')' | b']' | b'}' => {
-                        depth = depth.saturating_sub(1);
-                        if list.is_some_and(|d| depth < d) {
-                            list = None;
-                        }
-                    }
-                    b',' if list == Some(depth) => declaring = true,
-                    b';' if list.is_some_and(|d| depth <= d) => list = None,
-                    _ => {}
-                }
-                i += 1;
-            }
-        }
-    }
-    names
-}
-
 /// The subforms down to the one named `name` (unnamed subforms and areas between are walked through, the unnamed subforms
 /// kept in the path since their script objects reach what is below them); `false` leaves `path` as it was.
 fn subform_path<'a>(nodes: &'a [Node], name: &str, path: &mut Vec<&'a Subform>) -> bool {
@@ -1091,60 +1072,44 @@ fn subform_path<'a>(nodes: &'a [Node], name: &str, path: &mut Vec<&'a Subform>) 
 
 #[cfg(test)]
 mod script_object_tests {
-    use super::{ScriptObjects, declared_names, script_objects_for};
+    use super::script_objects_for;
+    use crate::model::{Node, PageArea, PageSet, ScriptObject, Subform};
 
-    #[test]
-    fn a_script_gets_the_objects_it_uses_from_its_subforms() {
-        let (tpl, _) = crate::parse(&crate::fixtures::script_objects_template()).expect("parses");
-        let prelude = script_objects_for(&tpl, "form[0].page[0].total[0]", "this.rawValue = Names.greet('x');").unwrap().prelude;
-        // Names is used directly, Calc by Names; Unused and the FormCalc object are not defined
-        assert!(prelude.contains("\"Calc\"") && prelude.contains("\"Names\""), "{prelude}");
-        assert!(prelude.find("\"Calc\"") < prelude.find("\"Names\""), "declared outer first");
-        assert!(!prelude.contains("var Unused") && !prelude.contains("Formcalc"), "{prelude}");
-        // from the root subform the inner object is out of reach, and a script that names none gets nothing
-        assert!(!script_objects_for(&tpl, "form[0]", "Names.greet()").unwrap().prelude.contains("var Names"));
-        assert_eq!(script_objects_for(&tpl, "form[0].page[0].total[0]", "this.rawValue = 1;").unwrap(), ScriptObjects::default());
-        // the objects of an unnamed subform between named ones reach the scripts below it
-        let (mut tpl, _) = crate::parse(&crate::fixtures::script_objects_template()).expect("parses");
-        let page = tpl
-            .root
-            .children
-            .iter_mut()
-            .find_map(|n| if let crate::model::Node::Subform(sf) = n { Some(sf) } else { None })
-            .expect("the page subform");
-        let inner = std::mem::take(page);
-        page.children.push(crate::model::Node::Subform(Box::new(crate::model::Subform {
-            script_objects: vec![crate::model::ScriptObject { name: "Mid".into(), text: "function m() { return 1; }".into(), variable: false }],
-            children: vec![crate::model::Node::Subform(inner)],
-            ..Default::default()
-        })));
-        let prelude = script_objects_for(&tpl, "form[0].page[0].total[0]", "Mid.m()").unwrap().prelude;
-        assert!(prelude.contains("\"Mid\""), "{prelude}");
-        // objects that add up to more than the bound are refused, not built
-        let (mut tpl, _) = crate::parse(&crate::fixtures::script_objects_template()).expect("parses");
-        tpl.root.script_objects.push(crate::model::ScriptObject {
-            name: "Huge".into(),
-            text: " ".repeat(super::MAX_SCRIPT_OBJECT_BYTES + 1),
-            variable: false,
-        });
-        let why = script_objects_for(&tpl, "form[0]", "Huge.x").unwrap_err();
-        assert!(why.contains("too large"), "{why}");
+    fn object(name: &str) -> ScriptObject {
+        ScriptObject { name: name.into(), text: "function m() { return 1; }".into(), variable: false }
+    }
+
+    fn keys(som: &str, tpl: &crate::model::Template) -> Vec<String> {
+        script_objects_for(tpl, som).codes.into_iter().map(|(k, _, _)| k).collect()
     }
 
     #[test]
-    fn declared_names_are_read_without_comments_strings_or_properties() {
-        let text = "//==== function\n/* var hidden */ var counter = 0; function check(x) { return \"function fake\" + x.function; }\nfunction* gen() {}\nlet last;";
-        assert_eq!(declared_names(text), ["counter", "check", "gen", "last"]);
-        // every declarator of a list, but not the commas inside its calls, arrays and objects
-        assert_eq!(
-            declared_names("var a = 1, b = f(2, c), d = [3, 4], e = { x: 1, y: 2 }, g; let h = 5; function i() { var j = 1, k; }"),
-            ["a", "b", "d", "e", "g", "h", "i", "j", "k"]
-        );
-        // words that are only keywords in some places are names
-        assert_eq!(declared_names("var get = 1; function set() {} var of = 2, async = 3, static = 4;"), ["get", "set", "of", "async", "static"]);
-        // a comment ending in a period before `function` does not make it a property
-        assert_eq!(declared_names("// ends here.\nfunction f() {}\nvar x = a.\n// note\nb;"), ["f", "x"]);
-        // a regular expression literal may hold quotes and a slash in a class without hiding what follows
-        assert_eq!(declared_names("var r = /^[a-z'\"/]*$/g; var q = 8 / 2; function after() {}"), ["r", "q", "after"]);
+    fn a_script_reaches_the_objects_of_its_subforms_and_page_masters() {
+        let (tpl, _) = crate::parse(&crate::fixtures::script_objects_template()).expect("parses");
+        assert_eq!(keys("form[0].page[0].total[0]", &tpl), ["form[0]|Calc", "form[0]|Unused", "form[0]|util", "form[0].page[0]|Names"]);
+        // a built-in's name is left alone; an object is defined lazily, its code out of the prelude
+        let p = script_objects_for(&tpl, "form[0].page[0].total[0]").prelude;
+        assert!(p.contains("__xfa_build(\"form[0]|Calc\", \"Calc\")") && !p.contains("twice"), "{p}");
+        // an inner object hides an outer one, an unnamed subform's objects reach what is below it
+        let (mut tpl, _) = crate::parse(&crate::fixtures::script_objects_template()).expect("parses");
+        let page = tpl.root.children.iter_mut().find_map(|n| if let Node::Subform(sf) = n { Some(sf) } else { None }).expect("page");
+        page.script_objects.push(ScriptObject { name: "Calc".into(), text: "var inner = 1;".into(), variable: false });
+        page.script_objects.push(object("Number"));
+        let inner = std::mem::take(&mut page.children);
+        page.children.push(Node::Subform(Box::new(Subform { script_objects: vec![object("Mid")], children: inner, ..Default::default() })));
+        let k = keys("form[0].page[0].total[0]", &tpl);
+        assert!(k.contains(&"form[0].page[0]|Calc".into()) && !k.contains(&"form[0]|Calc".into()), "{k:?}");
+        assert!(k.iter().any(|k| k.ends_with("|Mid")) && !k.iter().any(|k| k.ends_with("|Number")), "{k:?}");
+        // page masters reach their page area's and the page set's objects
+        tpl.root.page_set = Some(PageSet {
+            script_objects: vec![object("sobModeCheck")],
+            areas: vec![
+                PageArea { name: Some("Page1".into()), script_objects: vec![object("Master")], ..Default::default() },
+                PageArea { name: Some("Page2".into()), script_objects: vec![object("Other"), object("Other")], ..Default::default() },
+            ],
+        });
+        let k = keys("Page1[0].button[0]", &tpl);
+        assert!(k.contains(&"|sobModeCheck".into()) && k.contains(&"|Master".into()) && !k.iter().any(|k| k.ends_with("|Other")), "{k:?}");
+        assert!(keys("Page2[0].button[0]", &tpl).iter().any(|k| k.ends_with("|Other")));
     }
 }

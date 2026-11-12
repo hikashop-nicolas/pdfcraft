@@ -767,20 +767,10 @@ impl<'a, 'b> Runner<'a, 'b> {
         self.check_live();
         let event = XfaEvent { activity: ev.activity.clone(), target: ev.som.clone(), new_text: new_text.to_string(), prev_text: String::new() };
         let root = to_js(&self.live().root);
-        // a JavaScript event may call the script objects of its subform, which are defined in front of it
-        let objects = if ev.formcalc {
-            pdfcraft_xfa::ScriptObjects::default()
-        } else {
-            match pdfcraft_xfa::script_objects_for(self.tpl, &ev.som, &ev.script) {
-                Ok(objects) => objects,
-                Err(why) => {
-                    self.error(format!("{} ({}): {why}", ev.som, ev.activity));
-                    return Ok(None);
-                }
-            }
-        };
+        // a JavaScript event may call the script objects of its subform and those above it by name
+        let objects = if ev.formcalc { pdfcraft_xfa::ScriptObjects::default() } else { pdfcraft_xfa::script_objects_for(self.tpl, &ev.som) };
         // where things were laid out is worked out for the scripts that ask (`xfa.layout`), not for each one
-        let layout = if !ev.formcalc && (ev.script.contains("layout") || objects.prelude.contains("layout")) {
+        let layout = if !ev.formcalc && (ev.script.contains("layout") || objects.codes.iter().any(|(_, _, t)| t.contains("layout"))) {
             self.layout_boxes()
         } else {
             Default::default()
@@ -788,6 +778,7 @@ impl<'a, 'b> Runner<'a, 'b> {
         let script = Script {
             prelude: objects.prelude,
             texts: objects.texts,
+            codes: objects.codes,
             layout,
             source: ev.script.clone(),
             formcalc: ev.formcalc,

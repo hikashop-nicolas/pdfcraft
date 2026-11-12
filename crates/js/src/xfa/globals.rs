@@ -3,8 +3,8 @@ use super::instances::instance_manager;
 use super::model::{MAX_DEPTH, XfaBox, XfaDoc, XfaEffect, XfaEvent, clip, reset_names};
 use super::nodes::{node_index, node_object, noop, resolve_som, resolver, sink, sink_apply, visible_children};
 use super::{
-    Attribute, Context, HashMap, HashSet, JsResult, JsString, JsValue, NativeFunction, ObjectInitializer, arg, function, js_string, platform,
-    printd, printf, printx, s, scand, text,
+    Attribute, Context, HashMap, HashSet, JsResult, JsString, JsValue, NativeFunction, ObjectInitializer, arg, function, js_string, platform, printd,
+    printf, printx, s, scand, text,
 };
 
 // ── xfa.host, xfa.layout, xfa.event, app, console ───────────────────────────────────────────
@@ -206,8 +206,8 @@ fn layout_page_content(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsRe
 /// `__xfa_text(name)`: the text of a data script object.
 fn xfa_text(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let name = text(&arg(args, 0), ctx)?;
-    let found = host(ctx)?.borrow().texts.iter().find(|(n, _)| *n == name).map(|(_, t)| t.clone());
-    Ok(s(&found.unwrap_or_default()))
+    let found = host(ctx)?.borrow().texts.iter().find(|(n, _)| *n == name).map(|(_, t)| std::sync::Arc::clone(t));
+    Ok(s(found.as_deref().unwrap_or_default()))
 }
 
 fn null_value(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
@@ -374,6 +374,8 @@ pub(super) fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current
     ctx.register_global_property(js_string!("util"), util, rw)?;
     let xfa_text_fn = function(ctx, NativeFunction::from_fn_ptr(xfa_text));
     ctx.register_global_property(js_string!("__xfa_text"), xfa_text_fn, rw)?;
+    let build_fn = function(ctx, NativeFunction::from_fn_ptr(super::objects::build));
+    ctx.register_global_property(js_string!("__xfa_build"), build_fn, rw)?;
     // Unqualified names: the current node's children, its siblings, then each ancestor's
     // children, the nearest first. Instance managers as `_name`.
     let scopes: Vec<usize> = {

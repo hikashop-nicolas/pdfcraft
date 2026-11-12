@@ -210,6 +210,7 @@ pub fn layout(tpl: &Template, data: Option<&DataNode>) -> Result<Form, XfaError>
             items: Vec::new(),
             occur_max: None,
             occur_min: 0,
+            script_objects: Vec::new(),
         }],
     };
     let values = collect_values(tpl, data);
