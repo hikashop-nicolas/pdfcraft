@@ -309,6 +309,12 @@ fn find_container<'a>(n: &'a FormNode, som: &str, depth: usize) -> Option<&'a Fo
     n.children.iter().find_map(|c| find_container(c, som, depth + 1))
 }
 
+/// Whether a script asks where objects were laid out (`xfa.layout.h(this)`, `$layout.page(…)`, `pageContent(…)`): only those
+/// lay the form out for it (a `relayout()` or a page count doesn't).
+fn asks_where(script: &str) -> bool {
+    ["layout.x(", "layout.y(", "layout.w(", "layout.h(", "layout.page(", "pageSpan(", "pageContent("].iter().any(|call| script.contains(call))
+}
+
 fn has_node(n: &FormNode, som: &str, depth: usize) -> bool {
     depth <= 64 && (n.som == som || n.children.iter().any(|c| has_node(c, som, depth + 1)))
 }
@@ -1035,7 +1041,7 @@ impl<'a, 'b> Runner<'a, 'b> {
             }
         };
         // laid out only for the scripts that ask where things are, not for each one
-        let layout = if !ev.formcalc && ev.script.contains("layout") { self.layout_boxes() } else { Default::default() };
+        let layout = if !ev.formcalc && asks_where(&ev.script) { self.layout_boxes() } else { Default::default() };
         let script = Script {
             source: ev.script.clone(),
             formcalc: ev.formcalc,
