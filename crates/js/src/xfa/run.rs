@@ -136,6 +136,21 @@ pub(crate) fn run_here(
     limits: Limits,
     started: &dyn Fn(),
 ) -> XfaOutcome {
+    run_here_laid_out(script, event, doc, root, Default::default(), reuse, limits, started)
+}
+
+/// [`run_here`] with where the form's objects were laid out (`boxes`), which `xfa.layout` answers from.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_here_laid_out(
+    script: &str,
+    event: &XfaEvent,
+    doc: &XfaDoc,
+    root: Arc<XfaNode>,
+    boxes: Arc<Vec<super::model::XfaBox>>,
+    reuse: bool,
+    limits: Limits,
+    started: &dyn Fn(),
+) -> XfaOutcome {
     warm_up();
     let mut ctx = match Context::builder().host_hooks(std::rc::Rc::new(crate::CheckedCodeFromStrings)).build() {
         Ok(ctx) => ctx,
@@ -143,7 +158,8 @@ pub(crate) fn run_here(
     };
     ctx.runtime_limits_mut().set_loop_iteration_limit(limits.loop_iterations);
     ctx.runtime_limits_mut().set_recursion_limit(limits.recursion);
-    let host_state = XHost::new(root, reuse, &event.target, doc);
+    let mut host_state = XHost::new(root, reuse, &event.target, doc);
+    host_state.boxes = boxes;
     let current = host_state.current;
     ctx.insert_data(RefCell::new(host_state));
     let mut out = XfaOutcome::default();

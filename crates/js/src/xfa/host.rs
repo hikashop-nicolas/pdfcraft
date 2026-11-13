@@ -110,6 +110,8 @@ pub(crate) struct XHost {
     /// Bytes of edges and corners copied when a script reached sides a border doesn't list,
     /// against [`super::props::MAX_COPIED`].
     pub(super) copied: usize,
+    /// Where the form's objects were laid out, for `xfa.layout` (empty when the caller didn't lay the form out).
+    pub(crate) boxes: Arc<Vec<super::model::XfaBox>>,
 }
 
 impl XHost {
@@ -153,6 +155,7 @@ impl XHost {
             prop_writes: super::props::PropWrites::new(),
             dropped_prop_writes: 0,
             copied: 0,
+            boxes: Default::default(),
         }
     }
 

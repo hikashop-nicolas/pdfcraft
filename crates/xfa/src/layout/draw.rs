@@ -1,5 +1,5 @@
 use super::common::clean_name;
-use super::items::{Item, Rounded, Turned};
+use super::items::{Item, LayoutBox, Rounded, Turned};
 use super::{
     Arc, Border, Ctx, Draw, ExclGroup, Face, Field, Font, Layout, Layouter, MAX_DEPTH, MAX_IMAGE_BYTES, Node, Para, Rect, SomIndices, Stroke,
     Subform, Value, XfaError, data_path, text,
@@ -86,10 +86,33 @@ impl Layouter<'_> {
         if !views.any() {
             return Ok(());
         }
+        self.note_box(node, rect, ctx, sib);
         let outer = std::mem::replace(&mut self.views, views);
         let drawn = self.draw_node_in(node, rect, ctx, depth, sib);
         self.views = outer;
         drawn
+    }
+
+    /// Note where a named object went on the page being laid out, under the SOM path the live form gives it (an unnamed
+    /// container has its parent's path and no box of its own).
+    fn note_box(&mut self, node: &Node, rect: Rect, ctx: &Ctx, sib: usize) {
+        let c = node.common();
+        if c.name.is_none() {
+            return;
+        }
+        let class = match node {
+            Node::Subform(_) => "subform",
+            Node::Field(_) => "field",
+            Node::ExclGroup(_) => "exclGroup",
+            Node::Draw(_) => "draw",
+            Node::Area(_) => "area",
+        };
+        let master = self.in_master;
+        if let Some(page) = self.pages.last_mut()
+            && page.boxes.len() < super::MAX_LAYOUT_BOXES
+        {
+            page.boxes.push(LayoutBox { som: ctx.with_som(c, sib).som, class, rect, master });
+        }
     }
 
     /// [`Self::draw_node`] once where the node shows is set.

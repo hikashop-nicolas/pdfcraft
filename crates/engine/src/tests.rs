@@ -12179,6 +12179,19 @@ fn a_field_that_only_reads_the_page_count_keeps_its_scripts_value() {
     assert_eq!(value, vec!["pages: 1".to_string()]);
 }
 
+/// A script reads where the form laid its objects out (`xfa.layout`): a field's own box and page, and the page area's own
+/// objects on that page.
+#[test]
+fn xfa_scripts_read_where_objects_were_laid_out() {
+    let script = r#"<event activity="initialize"><script contentType="application/x-javascript">this.rawValue = xfa.layout.w(this, "pt") + "," + xfa.layout.h(this, "pt") + "," + xfa.layout.page(this) + "," + xfa.layout.pageContent(1, "field", true).length;</script></event>"#;
+    let template = pdfcraft_xfa::fixtures::repeated_print_button_template().replace("<value><text>Page 2</text></value>", script);
+    let bytes = Arc::new(pdfcraft_xfa::fixtures::shell(&template));
+    let mut s = Session::new();
+    let id = s.open("placed.pdf", None, bytes, None).expect("opens");
+    let value = |n: &str| s.get(id).unwrap().form.iter().find(|f| f.name == n).map(|f| f.value.clone()).unwrap_or_default();
+    assert_eq!(value("note2"), vec!["200,25,2,1".to_string()]);
+}
+
 /// layout:ready scripts run once on opening: the root's turns field highlighting on (only when it
 /// is off), a field's sets a value and a later script reads the new highlight, while page
 /// numbering is left to the layout and form:ready is another event.

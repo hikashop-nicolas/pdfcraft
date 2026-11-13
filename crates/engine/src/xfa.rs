@@ -483,6 +483,9 @@ struct Runner<'a, 'b> {
     /// `cached` as the scripts get it, made once and sent to each script until the live form
     /// changes in any way (a value too): the script engine reuses what it built from it.
     js_root: Option<Arc<XfaNode>>,
+    /// Where the form's objects were laid out as `js_root` holds the form, for the scripts that ask (`xfa.layout`): worked out
+    /// for the first of them, dropped with `js_root`.
+    boxes: Option<Arc<Vec<pdfcraft_js::xfa::XfaBox>>>,
     /// The script engine for this event: one thread for all its scripts, each run in a fresh
     /// context on the form as it is then (`cached`, kept up to date in place for values and
     /// rebuilt when the structure changed).
@@ -528,6 +531,7 @@ impl<'a, 'b> Runner<'a, 'b> {
             fields: None,
             cached: None,
             js_root: None,
+            boxes: None,
             session: None,
             changes: Changes::default(),
             numbered: HashSet::new(),
@@ -540,6 +544,38 @@ impl<'a, 'b> Runner<'a, 'b> {
     fn invalidate(&mut self) {
         self.cached = None;
         self.js_root = None;
+    }
+
+    /// Where the form's objects are laid out as it is now: laid out here once, until the form changes.
+    fn layout_boxes(&mut self) -> Arc<Vec<pdfcraft_js::xfa::XfaBox>> {
+        if let Some(b) = &self.boxes {
+            return Arc::clone(b);
+        }
+        let laid = pdfcraft_xfa::apply_overrides(self.tpl, &self.ov);
+        // a form that doesn't lay out answers 0 and the current page, as before
+        let boxes: Vec<pdfcraft_js::xfa::XfaBox> = match pdfcraft_xfa::layout_with_overrides(&laid, self.data.as_ref(), &self.ov) {
+            Ok(form) => form
+                .pages
+                .iter()
+                .enumerate()
+                .flat_map(|(page, p)| {
+                    p.boxes.iter().map(move |b| pdfcraft_js::xfa::XfaBox {
+                        som: b.som.clone(),
+                        class: b.class.to_string(),
+                        page,
+                        x: b.rect.x,
+                        y: b.rect.y,
+                        w: b.rect.w,
+                        h: b.rect.h,
+                        master: b.master,
+                    })
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        let boxes = Arc::new(boxes);
+        self.boxes = Some(Arc::clone(&boxes));
+        boxes
     }
 
     /// The script engine for this event.
@@ -991,11 +1027,15 @@ impl<'a, 'b> Runner<'a, 'b> {
         let root = match &self.js_root {
             Some(r) => Arc::clone(r),
             None => {
+                // the form changed since the boxes were worked out
+                self.boxes = None;
                 let r = Arc::new(to_js(&self.live().root, tpl));
                 self.js_root = Some(Arc::clone(&r));
                 r
             }
         };
+        // laid out only for the scripts that ask where things are, not for each one
+        let layout = if !ev.formcalc && ev.script.contains("layout") { self.layout_boxes() } else { Default::default() };
         let script = Script {
             source: ev.script.clone(),
             formcalc: ev.formcalc,
@@ -1003,6 +1043,7 @@ impl<'a, 'b> Runner<'a, 'b> {
             root,
             limits: limits_for(&ev.activity),
             timeout: timeout_for(&ev.activity).saturating_mul(self.run.time_scale),
+            layout,
         };
         let o = self.session().run(script);
         if o.abandoned {

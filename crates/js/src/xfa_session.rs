@@ -42,6 +42,9 @@ pub struct Script {
     pub root: std::sync::Arc<XfaNode>,
     pub limits: Limits,
     pub timeout: std::time::Duration,
+    /// Where the form's objects were laid out, for `xfa.layout`: send the same `Arc` while the form is unchanged, or none
+    /// when the script doesn't ask.
+    pub layout: std::sync::Arc<Vec<crate::xfa::XfaBox>>,
 }
 
 /// Run `s` here: a fresh context (JavaScript) or interpreter (FormCalc) on its copy of the
@@ -66,7 +69,7 @@ fn run_script(s: Script, doc: &XfaDoc, started: &dyn Fn()) -> XfaOutcome {
         started();
         return XfaOutcome { error: Some(why), ..Default::default() };
     }
-    crate::xfa::run_here(&s.source, &s.event, doc, s.root, true, s.limits, started)
+    crate::xfa::run_here_laid_out(&s.source, &s.event, doc, s.root, s.layout, true, s.limits, started)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -100,7 +100,7 @@ pub use data::{
     has_password_values, iso_to_pattern, parse_datasets, pattern_to_iso, radio_dataset_value, radio_state_for_item, read_values, read_values_with,
     remove_data_instance, som_to_path, write_data_ops, write_data_value, write_datasets, write_datasets_reusing, write_datasets_with,
 };
-pub use layout::{Action, BorderShape, Form, Item, MAX_PAGES, Page, Widget, WidgetKind, formatted_value, layout};
+pub use layout::{Action, BorderShape, Form, Item, LayoutBox, MAX_PAGES, Page, Widget, WidgetKind, formatted_value, layout, layout_with_overrides};
 pub use packets::{Encoding, Packets, decode as decode_packet, encode as encode_packet, read_packets};
 pub use parse::{measure, numbers_pages, parse};
 pub use pdf::{AREA_KEY, CLICK_KEY, DATE_KEY, LAYOUT_KEY, NODE_KEY, SOM_KEY, Stripped, XfaShape, existing_layout, strip, xfa_shape};

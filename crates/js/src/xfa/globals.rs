@@ -1,8 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::host::host;
-use super::instances::instance_manager;
-use super::model::{MAX_DEPTH, XfaDoc, XfaEffect, XfaEvent, clip, payload, reset_names};
+use super::instances::{instance_manager, list_object};
+use super::model::{MAX_DEPTH, XfaBox, XfaDoc, XfaEffect, XfaEvent, clip, payload, reset_names};
 use super::nodes::{node_index, node_object, noop, resolve_som, resolver, sink};
 use super::{
     Attribute, Context, JsResult, JsString, JsValue, NativeFunction, ObjectInitializer, arg, data_object, function, js_string, platform, printd,
@@ -149,9 +149,100 @@ fn response(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::null())
 }
 
-/// `xfa.layout.page(…)`: the current page, 1-based, whatever the argument.
-fn layout_page(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
-    Ok(JsValue::from(host(ctx)?.borrow().doc.page as f64 + 1.0))
+/// `xfa.layout.page(node)`: the page (1-based) the object was laid out on first; the current page for an object the layout
+/// didn't place, or when the form wasn't laid out for the script.
+fn layout_page(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let placed = box_of(args, usize::MAX, ctx)?;
+    Ok(JsValue::from(placed.map_or(host(ctx)?.borrow().doc.page as f64, |b| b.page as f64) + 1.0))
+}
+
+/// The box laid out for the node `args[0]` stands for: the `args[index_at]`-th when the object was laid out more than once
+/// (split over pages), else the first.
+fn box_of(args: &[JsValue], index_at: usize, ctx: &mut Context) -> JsResult<Option<XfaBox>> {
+    let Ok(idx) = node_index(&arg(args, 0), ctx) else { return Ok(None) };
+    let nth = match args.get(index_at) {
+        Some(v) => {
+            let n = v.to_number(ctx)?;
+            if n.is_finite() && n >= 0.0 { n as usize } else { 0 }
+        }
+        None => 0,
+    };
+    let h = host(ctx)?.borrow();
+    let Some(som) = h.nodes.get(idx).map(|n| n.som.clone()) else { return Ok(None) };
+    let mut found = h.boxes.iter().filter(|b| *b.som == *som);
+    let first = found.next().cloned();
+    Ok(if nth == 0 { first } else { found.nth(nth - 1).cloned().or(first) })
+}
+
+/// Points in the unit a script asks for (XFA 3.3 p. 437): inches unless it names another.
+fn in_unit(points: f64, unit: &str) -> f64 {
+    match unit.trim() {
+        "pt" => points,
+        "cm" => points / 72.0 * 2.54,
+        "mm" => points / 72.0 * 25.4,
+        "mp" => points * 1000.0,
+        _ => points / 72.0,
+    }
+}
+
+/// `xfa.layout.x|y|w|h(node[, unit[, offset]])`: where the object was laid out, 0 when it wasn't.
+fn layout_measure(args: &[JsValue], ctx: &mut Context, pick: fn(&XfaBox) -> f64) -> JsResult<JsValue> {
+    let unit = match args.get(1) {
+        Some(u) if !u.is_null_or_undefined() => text(u, ctx)?,
+        _ => String::new(),
+    };
+    Ok(JsValue::from(box_of(args, 2, ctx)?.map_or(0.0, |b| in_unit(pick(&b), &unit))))
+}
+
+fn layout_x(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    layout_measure(args, ctx, |b| b.x)
+}
+
+fn layout_y(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    layout_measure(args, ctx, |b| b.y)
+}
+
+fn layout_w(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    layout_measure(args, ctx, |b| b.w)
+}
+
+fn layout_h(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    layout_measure(args, ctx, |b| b.h)
+}
+
+/// `xfa.layout.pageSpan(node)`: how many pages the object was laid out over (0 when it wasn't).
+fn layout_page_span(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let Ok(idx) = node_index(&arg(args, 0), ctx) else { return Ok(JsValue::from(0.0)) };
+    let h = host(ctx)?.borrow();
+    let Some(som) = h.nodes.get(idx).map(|n| n.som.clone()) else { return Ok(JsValue::from(0.0)) };
+    let pages: HashSet<usize> = h.boxes.iter().filter(|b| *b.som == *som).map(|b| b.page).collect();
+    Ok(JsValue::from(pages.len() as f64))
+}
+
+/// `xfa.layout.pageContent(page, class, pageArea)`: the objects laid out on a page (0-based) of that class (any, when it is
+/// empty), in layout order: the page area's own with `pageArea` true, the flow's without.
+fn layout_page_content(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let page = arg(args, 0).to_number(ctx)?;
+    let class = match args.get(1) {
+        Some(c) if !c.is_null_or_undefined() => text(c, ctx)?,
+        _ => String::new(),
+    };
+    let master = arg(args, 2).to_boolean();
+    let found: Vec<usize> = {
+        let h = host(ctx)?.borrow();
+        if !page.is_finite() || page < 0.0 || h.boxes.is_empty() {
+            Vec::new()
+        } else {
+            let page = page as usize;
+            let by_som: HashMap<&str, usize> = h.nodes.iter().enumerate().filter(|(_, n)| !n.gone).map(|(i, n)| (&*n.som, i)).collect();
+            h.boxes
+                .iter()
+                .filter(|b| b.page == page && b.master == master && (class.is_empty() || b.class == class))
+                .filter_map(|b| by_som.get(b.som.as_str()).copied())
+                .collect()
+        }
+    };
+    list_object(ctx, &found)
 }
 
 /// `xfa.layout.absPage(…)`: the current page, 0-based, whatever the argument.
@@ -162,11 +253,6 @@ fn layout_page0(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsVal
 /// `xfa.layout.pageCount()` and `absPageCount()`: the document's page count.
 fn layout_page_count(_: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     Ok(JsValue::from(host(ctx)?.borrow().doc.page_count as f64))
-}
-
-/// The `xfa.layout` measures `h`, `w`, `x`, `y` and `pageSpan`: always 0.
-fn zero(_: &JsValue, _: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
-    Ok(JsValue::from(0.0))
 }
 
 /// `xfa.resolveNode(som)`, or `xfa.resolveNodes(som)` when `many`, resolving from the node the
@@ -222,11 +308,12 @@ pub(super) fn install(ctx: &mut Context, event: &XfaEvent, doc: &XfaDoc, current
         .function(NativeFunction::from_fn_ptr(layout_page_count), js_string!("sheetCount"), 0)
         .function(NativeFunction::from_fn_ptr(relayout), js_string!("relayout"), 0)
         .function(NativeFunction::from_fn_ptr(relayout), js_string!("relayoutPageArea"), 0)
-        .function(NativeFunction::from_fn_ptr(zero), js_string!("h"), 2)
-        .function(NativeFunction::from_fn_ptr(zero), js_string!("w"), 2)
-        .function(NativeFunction::from_fn_ptr(zero), js_string!("x"), 2)
-        .function(NativeFunction::from_fn_ptr(zero), js_string!("y"), 2)
-        .function(NativeFunction::from_fn_ptr(zero), js_string!("pageSpan"), 1)
+        .function(NativeFunction::from_fn_ptr(layout_h), js_string!("h"), 3)
+        .function(NativeFunction::from_fn_ptr(layout_w), js_string!("w"), 3)
+        .function(NativeFunction::from_fn_ptr(layout_x), js_string!("x"), 3)
+        .function(NativeFunction::from_fn_ptr(layout_y), js_string!("y"), 3)
+        .function(NativeFunction::from_fn_ptr(layout_page_span), js_string!("pageSpan"), 2)
+        .function(NativeFunction::from_fn_ptr(layout_page_content), js_string!("pageContent"), 3)
         .property(js_string!("ready"), JsValue::from(true), Attribute::READONLY)
         .build();
     // Two event objects, as in Acrobat's XFA scripting: `xfa.event`, whose target is the form
