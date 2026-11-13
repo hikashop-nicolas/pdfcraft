@@ -174,7 +174,7 @@ fn box_of(args: &[JsValue], index_at: usize, ctx: &mut Context) -> JsResult<Opti
     Ok(if nth == 0 { first } else { found.nth(nth - 1).cloned().or(first) })
 }
 
-/// Points in the unit a script asks for (XFA 3.3 p. 437): inches unless it names another.
+/// Points in the unit a script asks for: inches unless it names another.
 fn in_unit(points: f64, unit: &str) -> f64 {
     match unit.trim() {
         "pt" => points,
