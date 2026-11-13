@@ -776,24 +776,28 @@ fn rsa_private_key(k: &[Tlv<'_>]) -> Result<rsa::RsaPrivateKey, SignError> {
         .map_err(|e| SignError::Malformed(format!("RSA private key: {e}")))
 }
 
-/// A source of randomness that does not exist: the RSA private operation then runs unblinded. A key
-/// used by one person on their own device has no one to time it, which is what blinding guards against.
-enum NoRng {}
+/// The system's randomness (Web Crypto in the browser), which blinds the RSA private operation: each signature computes on a
+/// random multiple of the message, so its timing says nothing about the key (the `rsa` crate is not constant-time).
+struct SystemRng;
 
-impl rsa::rand_core::TryRng for NoRng {
-    type Error = std::convert::Infallible;
+impl rsa::rand_core::TryRng for SystemRng {
+    type Error = getrandom::Error;
     fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
-        match *self {}
+        let mut b = [0u8; 4];
+        getrandom::fill(&mut b)?;
+        Ok(u32::from_le_bytes(b))
     }
     fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
-        match *self {}
+        let mut b = [0u8; 8];
+        getrandom::fill(&mut b)?;
+        Ok(u64::from_le_bytes(b))
     }
-    fn try_fill_bytes(&mut self, _dest: &mut [u8]) -> Result<(), Self::Error> {
-        match *self {}
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), Self::Error> {
+        getrandom::fill(dest)
     }
 }
 
-impl rsa::rand_core::TryCryptoRng for NoRng {}
+impl rsa::rand_core::TryCryptoRng for SystemRng {}
 
 /// RSASSA-PKCS1-v1_5 (RFC 8017 §8.2.1) with a hash from this crate: the encoded message is built here and
 /// the private operation comes from the `rsa` crate.
@@ -819,7 +823,7 @@ fn rsa_sign_pkcs1(key: &rsa::RsaPrivateKey, alg: DigestAlg, msg: &[u8]) -> Resul
     em[k - t..k - hash.len()].copy_from_slice(prefix);
     em[k - hash.len()..].copy_from_slice(&hash);
     let c = rsa::BoxedUint::from_be_slice(&em, key.n().bits_precision()).map_err(|e| SignError::Crypto(format!("RSA message: {e}")))?;
-    let m = rsa::hazmat::rsa_decrypt_and_check(key, None::<&mut NoRng>, &c).map_err(|e| SignError::Crypto(format!("RSA signing failed: {e}")))?;
+    let m = rsa::hazmat::rsa_decrypt_and_check(key, Some(&mut SystemRng), &c).map_err(|e| SignError::Crypto(format!("RSA signing failed: {e}")))?;
     let bytes = m.to_be_bytes();
     let mut sig = vec![0u8; k.saturating_sub(bytes.len())];
     sig.extend_from_slice(&bytes);
