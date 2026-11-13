@@ -74,6 +74,37 @@ pdf.set_field("name", JSON.stringify({ text: "Ada" })); // { check: true } or { 
 `kind` is `text` (a paragraph the page already had), `image` (a picture it already had) or `added`
 (something added with `add_text` or `add_image`).
 
+## Forms and their scripts
+
+`pdf.fields(page)` lists one entry per widget, with `widget` (its number among the field's widgets);
+a check box or radio button also has `on` and `export`, a choice `combo` and `options`.
+
+```js
+pdf.set_field("size", JSON.stringify({ radio: "large" })); // a radio group's choice
+pdf.delete_field_widget("size", 2); // one button of the group; a field with one widget goes whole
+JSON.parse(pdf.field_actions("send")); // [{ trigger, kind, ... }]: javascript, uri, reset, named, goto, showhide, submit
+pdf.set_field_actions("send", JSON.stringify([{ trigger: "mouse_up", kind: "javascript", script: "app.alert('Hi')" }]));
+JSON.parse(pdf.field_scripts("total")); // { keystroke?, format?, validate?, calculate? }, as written
+pdf.set_field_script("total", "calculate", "event.value = 2 * qty.value;"); // an empty script removes it
+JSON.parse(pdf.run_action(JSON.stringify({ kind: "click" }), "send")); // { alerts, console, requests, errors }
+JSON.parse(pdf.take_js_output()); // what scripts printed or asked for during edits since the last call
+```
+
+A script's `requests` are what the page carries out itself: `print`, `goto`, `url`, `submit`, `focus`,
+`zoom`, `highlight`, `attachment`, `panel`, `reset`, `beep`, `saveAs`.
+
+## Redaction, marks, bookmarks and attachments
+
+```js
+pdf.add_redaction(0, [20, 40, 180, 60], "REDACTED"); // displayed boxes, flat; then apply_redactions()
+JSON.parse(pdf.hidden_info()); // what each kind of hidden information would remove; remove_hidden([ids])
+pdf.add_watermark(JSON.stringify({ text: "DRAFT" }), undefined, undefined); // or a picture's name and bytes
+pdf.add_header_footer(JSON.stringify({ text: ["", "", "", "", "Page <<1>> of <<n>>", ""] })); // header left, centre, right, then footer
+pdf.remove_marks("watermark"); // or "headerFooter", "background"
+JSON.parse(pdf.bookmarks()); // in outline order, each with its `path` (child indices); add_bookmark, rename_bookmark, move_bookmark and delete_bookmark take one as JSON (`"[0, 2]"`)
+JSON.parse(pdf.attachments()); // add_attachment(name, bytes, description), attachment_bytes(index)
+```
+
 An encrypted file throws an error that starts with `needs-password:` or `wrong-password:`, so the
 page can ask and try again. Page and block indices are 0-based.
 

@@ -5,8 +5,10 @@
 //! [`core`] holds all the logic with plain Rust types, so it is tested natively. The wasm-bindgen
 //! layer on top of it (`bindings`, wasm32 only) only converts types.
 
+pub mod actions;
 pub mod core;
 pub mod editing;
+pub mod pages;
 pub mod review;
 pub mod security;
 
