@@ -191,7 +191,7 @@ pub(crate) fn run_here_with(
                 ctx.global_object().delete_property_or_throw(boa_engine::JsString::from(name.as_str()), ctx)?;
             }
         }
-        install(ctx, event, doc, current)?;
+        install(ctx, event, doc, current, script)?;
         if let Some(key) = key
             && defined.is_none()
         {
