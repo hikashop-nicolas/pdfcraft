@@ -606,10 +606,24 @@ impl Default for Occur {
     }
 }
 
+/// A named JavaScript the form keeps under a subform's `<variables>` (a "script object"): its functions are called
+/// through its name, from any script of that subform or below.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ScriptObject {
+    pub name: String,
+    /// Shared: every script that can reach the object is handed it. For a variable, the value it holds.
+    pub text: std::sync::Arc<str>,
+    /// A `<variables>` text variable (`<text name="vFormLang">EN</text>`, or `integer`, `float`, `date`…): an object whose
+    /// `value` is its text, not code.
+    pub variable: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Subform {
     pub common: Common,
     pub layout: Layout,
+    /// `<variables><script name="…">`: JavaScript objects the subform's scripts call by name.
+    pub script_objects: Vec<ScriptObject>,
     pub children: Vec<Node>,
     /// `<event activity="…"><script>` on the subform (initialize, calculate, …).
     pub scripts: Vec<Script>,
@@ -937,6 +951,8 @@ impl Rect {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PageSet {
     pub areas: Vec<PageArea>,
+    /// `<variables><script name="…">` of the page set (and of page sets inside it): reached by the page masters' scripts.
+    pub script_objects: Vec<ScriptObject>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -953,6 +969,8 @@ pub struct PageArea {
     /// How many pages must use this master: a layout that ends with fewer adds pages for it.
     /// Zero without an `<occur>`.
     pub occur_min: usize,
+    /// `<variables><script name="…">` of the page area: reached by its own scripts.
+    pub script_objects: Vec<ScriptObject>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

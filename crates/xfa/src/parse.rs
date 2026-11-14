@@ -7,7 +7,7 @@ use roxmltree::Node as XmlNode;
 use crate::XfaError;
 use crate::model::{
     Access, Anchor, Area, Border, Caption, ChoiceList, Color, Common, Corner, Draw, Edge, ExclGroup, Field, FillKind, FontSpec, HAlign, Hatch,
-    Layout, Margin, Node, Occur, PageArea, PageRole, PageSet, ParaSpec, Paragraph, Placement, Presence, Prop, Props, Rect, RichText, Run, Script,
+    Layout, Margin, Node, Occur, PageArea, PageRole, PageSet, ParaSpec, Paragraph, Placement, Presence, Prop, Props, Rect, RichText, Run, Script, ScriptObject,
     Side, Stroke, Subform, Template, Traversal, Ui, VAlign, Value,
 };
 use crate::validation_rules::{Test, is_override};
@@ -1115,6 +1115,59 @@ fn parse_script(s: XmlNode, activity: &str) -> Script {
     Script { activity: activity.to_string(), text: text_of(s).trim().to_string(), formcalc: !ct.to_ascii_lowercase().contains("javascript") }
 }
 
+/// The JavaScript objects under `<variables>`: `<script name="LOVUtils" contentType="application/x-javascript">`. One longer
+/// than [`MAX_SCRIPT_OBJECT_TEXT`] is left out, with a warning, rather than cut into code that does not parse.
+fn parse_script_objects(n: XmlNode, warnings: &mut Vec<String>) -> Vec<ScriptObject> {
+    let mut out = Vec::new();
+    for vars in children(n, "variables").take(8) {
+        for s in children(vars, "script").take(64) {
+            let Some(name) = s.attribute("name").map(str::trim).filter(|v| is_js_identifier(v)) else { continue };
+            if !s.attribute("contentType").unwrap_or("").to_ascii_lowercase().contains("javascript") {
+                continue;
+            }
+            let mut text = String::new();
+            let mut whole = true;
+            for t in s.descendants().filter(|d| d.is_text()).filter_map(|d| d.text()) {
+                if text.len() + t.len() > MAX_SCRIPT_OBJECT_TEXT {
+                    whole = false;
+                    break;
+                }
+                text.push_str(t);
+            }
+            if !whole {
+                warnings.push(format!("the script object {name} is larger than {} MiB; it is left out", MAX_SCRIPT_OBJECT_TEXT >> 20));
+            } else if !text.trim().is_empty() {
+                out.push(ScriptObject { name: name.to_string(), text: text.into(), variable: false });
+            }
+        }
+        // Document variables that hold a value (XFA 3.3 p. 375, and the element p. 885 lists): scripts read and set it
+        // through `value`.
+        let held = vars.children().filter(|c| c.is_element() && VARIABLE_KINDS.contains(&c.tag_name().name()));
+        for v in held.take(MAX_VARIABLES) {
+            let Some(name) = v.attribute("name").map(str::trim).filter(|v| is_js_identifier(v)) else { continue };
+            let text: String = v.descendants().filter(|d| d.is_text()).filter_map(|d| d.text()).collect();
+            if text.len() <= MAX_SCRIPT_OBJECT_TEXT {
+                out.push(ScriptObject { name: name.to_string(), text: text.trim().into(), variable: true });
+            }
+        }
+    }
+    out
+}
+
+/// The content elements a `<variables>` element holds as named values.
+const VARIABLE_KINDS: &[&str] = &["text", "integer", "float", "decimal", "boolean", "date", "time", "dateTime"];
+
+/// The most named values read from one `<variables>` element.
+const MAX_VARIABLES: usize = 1024;
+
+/// The longest script object read (a form's libraries reach a few hundred KiB).
+pub const MAX_SCRIPT_OBJECT_TEXT: usize = 2 << 20;
+
+fn is_js_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+}
+
 /// `<event activity="…"><script>…</script></event>` children.
 fn parse_events(n: XmlNode) -> Vec<Script> {
     let mut scripts = Vec::new();
@@ -1145,6 +1198,7 @@ fn parse_occur(n: Option<XmlNode>) -> Occur {
 
 fn parse_page_set(n: XmlNode, warnings: &mut Vec<String>, depth: usize) -> PageSet {
     let mut areas = Vec::new();
+    let mut script_objects = parse_script_objects(n, warnings);
     for pa in children(n, "pageArea") {
         let medium = child(pa, "medium");
         let short = medium.and_then(|m| attr_measure(m, "short")).unwrap_or(612.0).clamp(1.0, 14_400.0);
@@ -1180,15 +1234,18 @@ fn parse_page_set(n: XmlNode, warnings: &mut Vec<String>, depth: usize) -> PageS
         // would exhaust it, and demand a page for every master).
         let occur = child(pa, "occur").map(|o| parse_occur(Some(o)));
         let (occur_min, occur_max) = occur.map_or((0, None), |o| (o.min, o.max));
-        areas.push(PageArea { name: pa.attribute("name").map(str::to_string), width, height, content, items, occur_max, occur_min });
+        let script_objects = parse_script_objects(pa, warnings);
+        areas.push(PageArea { name: pa.attribute("name").map(str::to_string), width, height, content, items, occur_max, occur_min, script_objects });
     }
     // Nested page sets: take their areas too.
     for ps in children(n, "pageSet") {
         if depth < MAX_DEPTH {
-            areas.extend(parse_page_set(ps, warnings, depth + 1).areas);
+            let inner = parse_page_set(ps, warnings, depth + 1);
+            areas.extend(inner.areas);
+            script_objects.extend(inner.script_objects);
         }
     }
-    PageSet { areas }
+    PageSet { areas, script_objects }
 }
 
 /// A `subform` element: its own attributes, its page set if it has one, and the nodes it holds,
@@ -1217,6 +1274,7 @@ fn parse_subform(n: XmlNode, warnings: &mut Vec<String>, depth: usize, set_layou
         layout,
         children: children_out,
         scripts: parse_events(n),
+        script_objects: parse_script_objects(n, warnings),
         page_set,
         occur: parse_occur(child(n, "occur")),
         break_before_page,

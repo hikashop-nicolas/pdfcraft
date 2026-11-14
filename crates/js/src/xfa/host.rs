@@ -56,7 +56,8 @@ pub(crate) type SomOwnerCounts = HashMap<Arc<str>, PathOwners>;
 
 /// The form the last script on this thread started from: the snapshot, its nodes flattened, and
 /// who owns each of their SOM paths once a script counted them.
-type Base = (Arc<XfaNode>, Vec<HNode>, Option<Arc<SomOwnerCounts>>);
+/// The form, flattened, the owners of its SOM paths once counted, and its [`XHost::shape`].
+type Base = (Arc<XfaNode>, Vec<HNode>, Option<Arc<SomOwnerCounts>>, u64);
 
 thread_local! {
     /// The form the last script on this thread started from, flattened: the next script of the
@@ -70,7 +71,7 @@ thread_local! {
 pub(super) fn remember_owners(root: &Arc<XfaNode>, owners: &Arc<SomOwnerCounts>) {
     BASE.with(|b| {
         if let Ok(mut b) = b.try_borrow_mut()
-            && let Some((r, _, kept)) = b.as_mut()
+            && let Some((r, _, kept, _)) = b.as_mut()
             && Arc::ptr_eq(r, root)
         {
             *kept = Some(Arc::clone(owners));
@@ -166,6 +167,25 @@ pub(crate) struct XHost {
     /// The form these nodes were copied from, when it is kept on this thread ([`BASE`]): the
     /// owners counted on them as copied are kept with it.
     pub(super) base: Option<Arc<XfaNode>>,
+    /// The script objects the script can reach ([`super::objects`]).
+    pub(crate) objects: Vec<super::objects::ScriptObjectCode>,
+    /// Bytes of script object code compiled for the script, against [`super::objects::MAX_LOADED_BYTES`].
+    pub(crate) loaded_bytes: usize,
+    /// A hash of the form's structure (each node's SOM and kind): the engine a session keeps serves the next script while it is
+    /// the same, the objects it built pointing at the same nodes.
+    pub(crate) shape: u64,
+}
+
+/// See [`XHost::shape`].
+fn shape_of(nodes: &[HNode]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for n in nodes {
+        n.som.hash(&mut h);
+        (n.kind as u8).hash(&mut h);
+        n.gone.hash(&mut h);
+    }
+    h.finish()
 }
 
 impl XHost {
@@ -174,17 +194,20 @@ impl XHost {
     /// With `reuse`, the flattened form is kept on this thread for the next script given the
     /// same `root` (the scripts of one event, [`crate::xfa_session`]).
     pub(crate) fn new(root: Arc<XfaNode>, reuse: bool, target: &str, doc: &XfaDoc) -> XHost {
-        let (nodes, owners, base) = if !reuse {
-            (flattened(&root), None, None)
+        let (nodes, owners, base, shape) = if !reuse {
+            let nodes = flattened(&root);
+            let shape = shape_of(&nodes);
+            (nodes, None, None, shape)
         } else {
             BASE.with(|b| {
                 let mut b = b.borrow_mut();
                 match b.as_ref() {
-                    Some((r, nodes, owners)) if Arc::ptr_eq(r, &root) => (nodes.clone(), owners.clone(), Some(root)),
+                    Some((r, nodes, owners, shape)) if Arc::ptr_eq(r, &root) => (nodes.clone(), owners.clone(), Some(root), *shape),
                     _ => {
                         let nodes = flattened(&root);
-                        *b = Some((Arc::clone(&root), nodes.clone(), None));
-                        (nodes, None, Some(root))
+                        let shape = shape_of(&nodes);
+                        *b = Some((Arc::clone(&root), nodes.clone(), None, shape));
+                        (nodes, None, Some(root), shape)
                     }
                 }
             })
@@ -218,6 +241,9 @@ impl XHost {
             copying: false,
             som_owners,
             base,
+            objects: Vec::new(),
+            loaded_bytes: 0,
+            shape,
         }
     }
 

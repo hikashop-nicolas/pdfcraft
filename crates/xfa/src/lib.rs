@@ -114,10 +114,10 @@ pub use parse::{measure, numbers_pages, parse};
 pub use pdf::{AREA_KEY, CLICK_KEY, DATE_KEY, LAYOUT_KEY, NODE_KEY, SOM_KEY, Stripped, XfaShape, existing_layout, strip, xfa_shape};
 pub use picture::typed_date;
 pub use script::{
-    Applied, FormNode, LiveForm, MAX_FORM_NODES, NodeKind, OVERRIDES_KEY, Overrides, PropRefused, ScriptEvent, apply_overrides,
-    apply_overrides_split, data_of, embedded_fields, field_grows_with_text, field_is_embedded, field_now, field_objects_by_som, fields_by_som,
-    form_tree, form_tree_paged, has_focus_scripts, has_scripts, overrides, overrides_of, page_area_uses, path_is_embedded, property_notes,
-    refresh_props, refresh_value, rerender, reset_default, set_overrides, template_of, value_overridden,
+    Applied, FormNode, LiveForm, MAX_FORM_NODES, NodeKind, OVERRIDES_KEY, Overrides, PropRefused, ReachableObject, ScriptEvent, ScriptObjectIndex,
+    apply_overrides, apply_overrides_split, data_of, embedded_fields, field_grows_with_text, field_is_embedded, field_now, field_objects_by_som,
+    fields_by_som, form_tree, form_tree_paged, has_focus_scripts, has_scripts, overrides, overrides_of, page_area_uses, path_is_embedded,
+    property_notes, refresh_props, refresh_value, rerender, reset_default, script_objects_for, set_overrides, template_of, value_overridden,
 };
 
 #[derive(Debug, thiserror::Error)]
