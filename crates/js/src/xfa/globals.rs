@@ -64,7 +64,7 @@ fn app_alert(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVal
 
 /// `xfa.host.resetData(names)`: asks to reset the comma-separated fields, or every field when
 /// the list is empty.
-fn reset_data(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+pub(super) fn reset_data(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let list = text(&arg(args, 0), ctx)?;
     effect(ctx, XfaEffect::ResetData(reset_names(&list)))?;
     Ok(JsValue::undefined())

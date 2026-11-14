@@ -26,6 +26,10 @@ pub(super) fn list_object(ctx: &mut Context, items: &[usize]) -> JsResult<JsValu
     Ok(ObjectInitializer::new(ctx)
         .property(js_string!("length"), JsValue::from(items.len() as f64), Attribute::READONLY)
         .property(js_string!("item"), item_fn, Attribute::all())
+        // changes to the form's structure from a script are not made here
+        .function(NativeFunction::from_fn_ptr(super::nodes::noop), js_string!("append"), 1)
+        .function(NativeFunction::from_fn_ptr(super::nodes::noop), js_string!("insert"), 2)
+        .function(NativeFunction::from_fn_ptr(super::nodes::noop), js_string!("remove"), 1)
         .build()
         .into())
 }

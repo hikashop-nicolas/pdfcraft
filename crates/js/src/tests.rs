@@ -1084,6 +1084,24 @@ mod xfa_model {
         assert_eq!(o.result.as_deref(), Some("form1,table,4,null"), "{o:?}");
     }
 
+    /// What forms ask of the form beyond the model takes the call: structure changes from a script (`nodes.append`,
+    /// `createNode`), the document an event's target stands for (`event.target.URL`, `resetForm`), and template parts
+    /// the host does not hold (`total.caption.value.#text`).
+    #[test]
+    fn scripts_reach_document_members_structure_stubs_and_template_parts() {
+        let cases = [
+            ("var n = xfa.form.createNode('extras', 'g'); this.nodes.append(n); this.nodes.remove(n); this.nodes.insert(n, n); 1", "1"),
+            ("typeof this.createNode", "function"),
+            ("this.URL + ',' + this.numPages + ',' + typeof this.resetForm + ',' + this.dirty", "f.pdf,3,function,false"),
+            ("xfa.resolveNode('form1.page1.total.caption.value.#text') !== null", "true"),
+            ("xfa.resolveNode('form1.page1.nothing.caption') === null", "true"),
+        ];
+        for (src, want) in cases {
+            let o = go(src, "form1[0].page1[0].total[0]", "calculate");
+            assert_eq!(o.result.as_deref(), Some(want), "{src}: {o:?}");
+        }
+    }
+
     #[test]
     fn calculate_scripts_see_siblings_by_name_and_yield_their_last_expression() {
         let o = go("qty.rawValue * price.rawValue", "form1[0].page1[0].total[0]", "calculate");
@@ -2362,7 +2380,17 @@ mod session {
         let lib = [object("lib", Some("form1[0]"), "var n = 0; function add() { return ++n; }")];
         let run = |session: u64| {
             let sc = script("lib.add()", false, "form1[0].page1[0].total[0]", "calculate");
-            let o = crate::xfa::run_here_with(&sc.source, lib.to_vec(), &sc.event, &XfaDoc::default(), (sc.root, &sc.props), true, session, sc.limits, &|| {});
+            let o = crate::xfa::run_here_with(
+                &sc.source,
+                lib.to_vec(),
+                &sc.event,
+                &XfaDoc::default(),
+                (sc.root, &sc.props),
+                true,
+                session,
+                sc.limits,
+                &|| {},
+            );
             o.error.map_or(o.result.unwrap_or_default(), |e| e)
         };
         let (a, b) = (u64::MAX - 1, u64::MAX - 2);

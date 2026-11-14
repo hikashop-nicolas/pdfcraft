@@ -431,6 +431,7 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
         "getElement" => node_method(ctx, idx, props::get_element),
         "isPropertySpecified" => node_method(ctx, idx, props::is_property_specified),
         "execValidate" => node_method(ctx, idx, props::exec_validate),
+        "createNode" => function(ctx, NativeFunction::from_fn_ptr(sink_apply)).into(),
         "setAttribute" | "execEvent" | "execInitialize" | "execCalculate" | "setElement" | "loadXML" | "saveXML" | "clone" => {
             function(ctx, NativeFunction::from_fn_ptr(noop)).into()
         }
@@ -481,7 +482,7 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
                 None => match super::objects::child_object(ctx, idx, other)? {
                     v if !v.is_undefined() => v,
                     _ if SINK_MEMBERS.contains(&other) => sink(ctx)?,
-                    _ => JsValue::undefined(),
+                    _ => document_property(ctx, other)?.unwrap_or_else(JsValue::undefined),
                 },
             }
         }
@@ -758,4 +759,18 @@ fn variables_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<J
         return Ok(function(ctx, NativeFunction::from_copy_closure_with_captures(named, key)).into());
     }
     super::objects::child_object(ctx, idx, &name)
+}
+
+/// `event.target` is the Acrobat document when an event is the form's own (`myDoc.resetForm([...])`, `myDoc.URL`): what a
+/// form's scripts ask of it, for a name no child of the node has.
+fn document_property(ctx: &mut Context, name: &str) -> JsResult<Option<JsValue>> {
+    Ok(Some(match name {
+        "resetForm" => function(ctx, NativeFunction::from_fn_ptr(super::globals::reset_data)).into(),
+        "URL" | "path" | "documentFileName" => s(&host(ctx)?.borrow().doc.file_name),
+        "numPages" => JsValue::from(host(ctx)?.borrow().doc.page_count as f64),
+        "getField" | "info" => function(ctx, NativeFunction::from_fn_ptr(sink_apply)).into(),
+        "mailDoc" | "submitForm" | "saveAs" | "closeDoc" | "importDataObject" => function(ctx, NativeFunction::from_fn_ptr(noop)).into(),
+        "dirty" => JsValue::from(false),
+        _ => return Ok(None),
+    }))
 }

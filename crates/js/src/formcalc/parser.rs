@@ -56,6 +56,10 @@ impl Parser {
     }
 
     fn expect_kw(&mut self, word: &str) -> Result<(), String> {
+        // `then` and `do` may start the next line
+        if matches!(word, "then" | "do") {
+            self.skip_newlines();
+        }
         if self.eat_kw(word) { Ok(()) } else { Err(format!("line {}: expected {word}", self.line())) }
     }
 
@@ -450,6 +454,13 @@ pub(super) fn parse(src: &str) -> Result<Vec<Stmt>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn then_and_do_may_start_the_next_line() {
+        assert!(parse("if (1 <> 2)\nthen\nvar a = 1\nendif").is_ok());
+        assert!(parse("var i = 0\nwhile (i < 2)\ndo\ni = i + 1\nendwhile").is_ok());
+        assert!(parse("if (1)\nvar a = 1\nendif").is_err());
+    }
 
     #[test]
     fn unary_not_does_not_swallow_following_bang() {
