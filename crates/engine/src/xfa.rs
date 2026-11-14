@@ -930,7 +930,7 @@ impl<'a, 'b> Runner<'a, 'b> {
         if !self.field_changes.is_empty() {
             let changes: Vec<pdfcraft_forms::FieldChange> = std::mem::take(&mut self.field_changes)
                 .into_iter()
-                .map(|(name, value)| pdfcraft_forms::FieldChange { name, value: Some(value), ..Default::default() })
+                .map(|(name, value)| pdfcraft_forms::FieldChange { name, value: Some(value), beyond_max_len: true, ..Default::default() })
                 .collect();
             pdfcraft_forms::apply_script_changes(self.doc, &changes, &mut pdfcraft_forms::NoScripts).map_err(|e| e.to_string())?;
             self.fields = None;
@@ -943,6 +943,10 @@ impl<'a, 'b> Runner<'a, 'b> {
             // What the packet now holds (a value it could not take is reported above).
             self.data = pdfcraft_xfa::data_of(self.doc);
             self.invalidate();
+            // the reload drops what only a static form's fields hold: the later scripts still read it
+            if self.static_form {
+                self.fill_from_fields();
+            }
         }
         Ok(())
     }

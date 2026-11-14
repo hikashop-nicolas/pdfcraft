@@ -154,6 +154,12 @@ pub fn static_scripted_shell(data: &str) -> Vec<u8> {
 /// [`static_scripted_shell`] whose field `name` holds `name` in its AcroForm value only (`/V`), as a viewer that writes
 /// only the fields leaves it.
 pub fn static_scripted_shell_with(data: &str, name: Option<&str>) -> Vec<u8> {
+    static_scripted_shell_max_len(data, name, None)
+}
+
+/// [`static_scripted_shell_with`] whose field `total` also has `/MaxLen max_len`, as Designer may write a field that a
+/// script fills (PDFBOX-2755's `total` has `/MaxLen 1`).
+pub fn static_scripted_shell_max_len(data: &str, name: Option<&str>, max_len: Option<usize>) -> Vec<u8> {
     let xdp = format!(
         "<xdp:xdp xmlns:xdp=\"http://ns.adobe.com/xdp/\">{}<xfa:datasets xmlns:xfa=\"http://www.xfa.org/schema/xfa-data/1.0/\"><xfa:data>{data}</xfa:data></xfa:datasets></xdp:xdp>",
         static_scripted_template()
@@ -180,7 +186,13 @@ pub fn static_scripted_shell_with(data: &str, name: Option<&str>) -> Vec<u8> {
             .into_bytes(),
             None => text("name", 7, 700),
         },
-        text("total", 7, 660),
+        match max_len {
+            Some(n) => format!(
+                "<< /Type /Annot /Subtype /Widget /FT /Tx /T (total[0]) /MaxLen {n} /Parent 7 0 R /Rect [72 660 300 680] /P 3 0 R /DA (/Helv 10 Tf 0 g) /MK << /BC [0 0 0] >> >>"
+            )
+            .into_bytes(),
+            None => text("total", 7, 660),
+        },
         b"<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 65536 /T (go[0]) /Parent 7 0 R /Rect [72 620 160 640] /P 3 0 R /MK << /BC [0 0 0] /CA (Go) >> >>".to_vec(),
         b"<< /T (#subform[0]) /Parent 7 0 R /Kids [12 0 R] >>".to_vec(),
         text("inner", 11, 580),
@@ -204,7 +216,7 @@ pub fn static_scripted_shell_with(data: &str, name: Option<&str>) -> Vec<u8> {
 /// writes `total`; the push button `hide` hides the radio button `large`, then, clicked again, the group `size` while
 /// setting `small` itself visible. `form1.page1` holds the text fields `name` (whose exit script writes
 /// `total`), `total` (whose initialize script fills it) and, in an unnamed subform, `inner` (whose initialize script fills
-/// it); the push button `go`, whose click script sets `total`, hides `name`, makes `inner` read-only and shows a message;
+/// it and whose calculate script reads `name`); the push button `go`, whose click script sets `total`, hides `name`, makes `inner` read-only and shows a message;
 /// the check box `agree` and the radio group `size` (buttons `small` and `large`), whose click scripts write `total`.
 /// See [`static_scripted_shell`] for `stamp` and `hide`.
 pub fn static_scripted_template() -> String {
@@ -237,7 +249,8 @@ pub fn static_scripted_template() -> String {
             "click",
             "total.rawValue = &quot;clicked&quot;; name.presence = &quot;hidden&quot;; this.parent.nodes.item(3).nodes.item(0).access = &quot;readOnly&quot;; xfa.host.messageBox(&quot;done&quot;);"
         ),
-        js("initialize", "this.rawValue = &quot;inner&quot;;"),
+        js("initialize", "this.rawValue = &quot;inner&quot;;")
+            + &js("calculate", "name.rawValue ? &quot;calc:&quot; + name.rawValue : &quot;inner&quot;"),
         js("click", "total.rawValue = &quot;agree:&quot; + this.rawValue;"),
         radio("small", 1),
         radio("large", 2),
