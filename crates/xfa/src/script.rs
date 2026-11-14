@@ -90,6 +90,8 @@ pub struct LiveForm {
 pub struct Overrides {
     pub presence: BTreeMap<String, String>,
     pub access: BTreeMap<String, String>,
+    /// Sizes and positions a script set, as it wrote them, by `som#property` (`form[0].head[0]#h`).
+    pub geometry: BTreeMap<String, String>,
     /// Property changes (see [`crate::restyle`]): by SOM path, then by property key
     /// ([`crate::restyle::prop_key`]), the value set. Bounded by
     /// [`crate::restyle::MAX_PROP_OVERRIDES`] changes and
@@ -126,7 +128,7 @@ pub enum PropRefused {
 
 impl Overrides {
     pub fn is_empty(&self) -> bool {
-        self.presence.is_empty() && self.access.is_empty() && self.props.is_empty()
+        self.presence.is_empty() && self.access.is_empty() && self.geometry.is_empty() && self.props.is_empty()
     }
 
     /// The property changes, by SOM path.
@@ -250,7 +252,7 @@ fn read_overrides(doc: &Document, tpl: Option<&Template>) -> Overrides {
     let Some((_, acro)) = acroform(doc) else { return out };
     let Some(o) = acro.get(OVERRIDES_KEY).map(|o| doc.resolve(o)) else { return out };
     let Some(d) = o.as_dict() else { return out };
-    for (which, map) in [(&b"Presence"[..], &mut out.presence), (&b"Access"[..], &mut out.access)] {
+    for (which, map) in [(&b"Presence"[..], &mut out.presence), (&b"Access"[..], &mut out.access), (&b"Geometry"[..], &mut out.geometry)] {
         if let Some(m) = d.get(which).map(|m| doc.resolve(m))
             && let Some(m) = m.as_dict()
         {
@@ -389,7 +391,7 @@ pub fn set_overrides(doc: &mut Document, ov: &Overrides) -> Result<(), XfaError>
         acro.remove(OVERRIDES_KEY);
     } else {
         let mut d = Dict::new();
-        for (which, map) in [("Presence", &ov.presence), ("Access", &ov.access)] {
+        for (which, map) in [("Presence", &ov.presence), ("Access", &ov.access), ("Geometry", &ov.geometry)] {
             if map.is_empty() {
                 continue;
             }
@@ -1217,6 +1219,9 @@ pub(crate) fn apply_overrides_to(nodes: &mut [Node], parent_som: &str, ov: &Over
         // the overrides under it.
         let presence = name.and_then(|_| ov.presence.get(&som)).map(|p| Presence::parse(Some(p)));
         let access = name.and_then(|_| ov.access.get(&som)).cloned();
+        if name.is_some() && !ov.geometry.is_empty() {
+            apply_geometry(n.common_mut(), &som, ov);
+        }
         match n {
             Node::Subform(s) => {
                 if let Some(p) = presence {
@@ -1260,6 +1265,24 @@ pub(crate) fn apply_overrides_to(nodes: &mut [Node], parent_som: &str, ov: &Over
                     }
                 }
             }
+        }
+    }
+}
+
+/// The sizes and positions `ov` holds for the object at `som`, in `c`.
+fn apply_geometry(c: &mut crate::model::Common, som: &str, ov: &Overrides) {
+    for (prop, slot) in [
+        ("x", &mut c.x),
+        ("y", &mut c.y),
+        ("w", &mut c.w),
+        ("h", &mut c.h),
+        ("minW", &mut c.min_w),
+        ("maxW", &mut c.max_w),
+        ("minH", &mut c.min_h),
+        ("maxH", &mut c.max_h),
+    ] {
+        if let Some(points) = ov.geometry.get(&format!("{som}#{prop}")).and_then(|v| crate::parse::measure(v)) {
+            *slot = Some(points);
         }
     }
 }
@@ -1343,6 +1366,9 @@ pub fn apply_overrides_split(tpl: &Template, ov: &Overrides) -> Applied {
                 };
                 if props && name.is_some() && !in_repeat && !repeats {
                     self.props(n, &som);
+                }
+                if presence_on && name.is_some() && !ov.geometry.is_empty() {
+                    apply_geometry(n.common_mut(), &som, ov);
                 }
                 let inner = in_repeat || repeats;
                 match n {

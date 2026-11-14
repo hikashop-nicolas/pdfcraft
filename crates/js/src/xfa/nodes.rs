@@ -520,6 +520,10 @@ fn node_set(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
             };
             h.set_state(idx, XfaEffect::SetAccess { som, access: a });
         }
+        // a size or position the layout then takes
+        "x" | "y" | "w" | "h" | "minH" | "maxH" | "minW" | "maxW" if is_measurement(&value) && child_named(&h, idx, &key).is_none() => {
+            h.set_state(idx, XfaEffect::SetGeometry { som, prop: key.clone(), value: value.trim().to_string() });
+        }
         // A child of the same name is what a read of the member gives (see `node_get`), so a
         // write names that child too, and doesn't reach the property; writes to a child by name
         // are not modelled, as for every other child name.
@@ -773,4 +777,12 @@ fn document_property(ctx: &mut Context, name: &str) -> JsResult<Option<JsValue>>
         "dirty" => JsValue::from(false),
         _ => return Ok(None),
     }))
+}
+
+/// Whether `v` reads as a measurement (`2in`, `12.5mm`, `-3pt`, `10`): a number and, perhaps, a unit.
+fn is_measurement(v: &str) -> bool {
+    let v = v.trim();
+    let split = v.find(|c: char| c.is_ascii_alphabetic() || c == '%').unwrap_or(v.len());
+    let (num, unit) = v.split_at(split);
+    num.trim().parse::<f64>().is_ok_and(f64::is_finite) && matches!(unit.trim(), "" | "pt" | "mm" | "cm" | "in" | "mp")
 }

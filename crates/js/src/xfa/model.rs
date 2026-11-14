@@ -166,6 +166,12 @@ pub enum XfaEffect {
         som: String,
         access: String,
     },
+    /// A size or position of an object (`h`, `w`, `x`, `y`, `minH`, `maxH`, `minW`, `maxW`) as the script wrote it (`"2in"`).
+    SetGeometry {
+        som: String,
+        prop: String,
+        value: String,
+    },
     /// A new instance of a repeating subform, named by its own SOM (`…row[3]`).
     AddInstance {
         som: String,
@@ -316,6 +322,7 @@ pub(super) fn effect_key(e: &XfaEffect) -> Option<(u8, String)> {
         XfaEffect::SetValue { som, .. } => Some((0, som.clone())),
         XfaEffect::SetPresence { som, .. } => Some((1, som.clone())),
         XfaEffect::SetAccess { som, .. } => Some((2, som.clone())),
+        XfaEffect::SetGeometry { som, prop, .. } => Some((5, format!("{som}#{prop}"))),
         // A path never holds `@`, so the attribute after it can't run into the path.
         XfaEffect::SetProperty { som, path, attr, copied, .. } => {
             Some((if *copied { 4 } else { 3 }, format!("{som}\u{0}{path}@{}", attr.as_deref().unwrap_or("#text"))))
@@ -333,6 +340,7 @@ pub(super) fn payload(e: &XfaEffect) -> usize {
         XfaEffect::SetProperty { som, path, attr, value, .. } => {
             som.len().saturating_add(path.len()).saturating_add(attr.as_ref().map_or(0, String::len)).saturating_add(value.len())
         }
+        XfaEffect::SetGeometry { som, prop, value } => som.len().saturating_add(prop.len()).saturating_add(value.len()),
         XfaEffect::AddInstance { som } | XfaEffect::RemoveInstance { som } => som.len(),
         XfaEffect::OpenAttachment { name, .. } => name.len(),
         XfaEffect::MessageBox(m) => m.bytes(),

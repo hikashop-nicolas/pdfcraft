@@ -1285,6 +1285,14 @@ impl<'a, 'b> Runner<'a, 'b> {
                         relayout = true;
                     }
                 }
+                XfaEffect::SetGeometry { som, prop, value } => {
+                    if self.ov.geometry.insert(format!("{som}#{prop}"), value.clone()).as_ref() != Some(value) {
+                        self.ov_dirty = true;
+                        self.changes.visibility += 1;
+                        self.invalidate();
+                        relayout = true;
+                    }
+                }
                 XfaEffect::AddInstance { som } | XfaEffect::RemoveInstance { som } if self.static_form => {
                     // A static form has a fixed layout: no field to add or take out.
                     self.console([format!("{} ({}): a static form can't add or remove {som}; ignored", ev.som, ev.activity)]);

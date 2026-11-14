@@ -12308,6 +12308,27 @@ fn xfa_scripts_read_where_objects_were_laid_out() {
     assert_eq!(value("note2"), vec!["200,25,2,1".to_string()]);
 }
 
+/// A size a script sets is what the form is laid out with, and what a later script reads back from `xfa.layout`.
+#[test]
+fn a_size_a_script_sets_reaches_the_layout() {
+    let field = |name: &str, events: &str| format!("<field name=\"{name}\" w=\"2in\" h=\"0.3in\"><ui><textEdit/></ui>{events}</field>");
+    let js = |activity: &str, code: &str| {
+        format!("<event activity=\"{activity}\"><script contentType=\"application/x-javascript\">{code}</script></event>")
+    };
+    let template = format!(
+        "<template xmlns=\"http://www.xfa.org/schema/xfa-template/3.3/\"><subform name=\"form1\" layout=\"tb\">\
+         <pageSet><pageArea name=\"p\"><contentArea x=\"0.5in\" y=\"0.5in\" w=\"7.5in\" h=\"10in\"/><medium short=\"8.5in\" long=\"11in\"/></pageArea></pageSet>\
+         <subform name=\"page1\" layout=\"tb\">{}{}</subform></subform></template>",
+        field("resized", &js("initialize", "this.w = &quot;3in&quot;; this.rawValue = &quot;set&quot;;")),
+        field("sees", &js("calculate", "xfa.layout.w(resized, &quot;in&quot;, 0)")),
+    );
+    let bytes = Arc::new(pdfcraft_xfa::fixtures::shell(&template));
+    let mut s = Session::new();
+    let id = s.open("sized.pdf", None, bytes, None).expect("opens");
+    let value = |n: &str| s.get(id).unwrap().form.iter().find(|f| f.name == n).map(|f| f.value.clone()).unwrap_or_default();
+    assert_eq!(value("sees"), vec!["3".to_string()], "{:?}", s.take_js_output(id));
+}
+
 /// layout:ready scripts run once on opening: the root's turns field highlighting on (only when it
 /// is off), a field's sets a value and a later script reads the new highlight, while page
 /// numbering is left to the layout and form:ready is another event.
