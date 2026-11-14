@@ -915,13 +915,15 @@ pub struct ReachableObject {
     /// No event script names it (other objects may): a module that extends another object, loaded when an object its code
     /// names loads (`NS.jForm.x = …` once `NS` is built), as Acrobat builds every object up front.
     pub unnamed: bool,
+    /// A text variable: `text` is its value ([`ScriptObject::variable`]).
+    pub variable: bool,
 }
 
 /// Every script object of a form, read once per form rather than for each script: what the unique-name fallback of
 /// [`script_objects_for`] looks through.
 #[derive(Clone, Debug, Default)]
 pub struct ScriptObjectIndex {
-    all: Vec<(String, Option<String>, Arc<str>)>,
+    all: Vec<(String, Option<String>, Arc<str>, bool)>,
     counts: HashMap<String, usize>,
     /// Names of objects that no event script mentions.
     unnamed: std::collections::HashSet<String>,
@@ -937,7 +939,7 @@ impl ScriptObjectIndex {
     pub fn of(tpl: &Template) -> Self {
         let mut index = ScriptObjectIndex { complete: true, ..Default::default() };
         index.subform(&tpl.root, None, 0, 0);
-        for (name, _, _) in &index.all {
+        for (name, _, _, _) in &index.all {
             *index.counts.entry(name.clone()).or_insert(0) += 1;
         }
         index.unnamed = index.never_named(tpl);
@@ -964,7 +966,7 @@ impl ScriptObjectIndex {
                 self.complete = false;
                 return;
             }
-            self.all.push((o.name.clone(), som.map(str::to_string), Arc::clone(&o.text)));
+            self.all.push((o.name.clone(), som.map(str::to_string), Arc::clone(&o.text), o.variable));
         }
     }
 
@@ -1074,15 +1076,23 @@ pub fn script_objects_for(tpl: &Template, index: &ScriptObjectIndex, som: &str) 
             for x in out.iter_mut().filter(|x| x.name == o.name) {
                 x.bare = false;
             }
-            let unnamed = index.complete && index.unnamed.contains(&o.name);
-            out.push(ReachableObject { name: o.name.clone(), som: som.clone(), text: Arc::clone(&o.text), bare: true, unnamed });
+            // a variable is read by name wherever it is used, never loaded as a module
+            let unnamed = !o.variable && index.complete && index.unnamed.contains(&o.name);
+            out.push(ReachableObject {
+                name: o.name.clone(),
+                som: som.clone(),
+                text: Arc::clone(&o.text),
+                bare: true,
+                unnamed,
+                variable: o.variable,
+            });
         }
     }
     if index.complete {
-        for (name, som, text) in &index.all {
+        for (name, som, text, variable) in &index.all {
             if index.counts.get(name) == Some(&1) && !out.iter().any(|x| x.name == *name) {
-                let unnamed = index.unnamed.contains(name);
-                out.push(ReachableObject { name: name.clone(), som: som.clone(), text: Arc::clone(text), bare: true, unnamed });
+                let unnamed = !variable && index.unnamed.contains(name);
+                out.push(ReachableObject { name: name.clone(), som: som.clone(), text: Arc::clone(text), bare: true, unnamed, variable: *variable });
             }
         }
     }
@@ -1200,7 +1210,7 @@ mod script_object_tests {
     }
 
     fn object(name: &str) -> ScriptObject {
-        ScriptObject { name: name.into(), text: "function m() { return 1; }".into() }
+        ScriptObject { name: name.into(), text: "function m() { return 1; }".into(), variable: false }
     }
 
     fn named(name: &str) -> Common {
@@ -1224,7 +1234,7 @@ mod script_object_tests {
         // an inner object hides an outer one of its name for the bare name, the outer one kept for `form.Calc`
         let (mut tpl, _) = crate::parse(&crate::fixtures::script_objects_template()).expect("parses");
         let page = tpl.root.children.iter_mut().find_map(|n| if let Node::Subform(sf) = n { Some(sf) } else { None }).expect("page");
-        page.script_objects.push(ScriptObject { name: "Calc".into(), text: "var inner = 1;".into() });
+        page.script_objects.push(ScriptObject { name: "Calc".into(), text: "var inner = 1;".into(), variable: false });
         let inner = std::mem::take(&mut page.children);
         page.children.push(Node::Subform(Box::new(Subform { script_objects: vec![object("Mid")], children: inner, ..Default::default() })));
         let deep = reach(&tpl, "form[0].page[0].total[0]");
@@ -1253,7 +1263,7 @@ mod script_object_tests {
         let sub = |name: &str, objects: Vec<ScriptObject>, children: Vec<Node>| {
             Node::Subform(Box::new(Subform { common: named(name), script_objects: objects, children, ..Default::default() }))
         };
-        let calc = |text: &str| ScriptObject { name: "Calc".into(), text: text.into() };
+        let calc = |text: &str| ScriptObject { name: "Calc".into(), text: text.into(), variable: false };
         let tpl = Template {
             root: Subform {
                 common: named("form"),
@@ -1282,7 +1292,7 @@ mod script_object_tests {
     #[test]
     fn an_object_no_event_script_names_is_marked_unnamed() {
         use crate::model::{Field, Script};
-        let text = |name: &str, text: &str| ScriptObject { name: name.into(), text: text.into() };
+        let text = |name: &str, text: &str| ScriptObject { name: name.into(), text: text.into(), variable: false };
         let script = Script { activity: "calculate".into(), text: "this.rawValue = NS.jForm.x.f() + calcs.sum();".into(), formcalc: false };
         // a FormCalc script can't name one
         let formcalc = Script { activity: "validate".into(), text: "module_x == 1".into(), formcalc: true };

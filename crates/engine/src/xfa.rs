@@ -1007,7 +1007,14 @@ impl<'a, 'b> Runner<'a, 'b> {
             let index = self.object_index.get_or_insert_with(|| pdfcraft_xfa::ScriptObjectIndex::of(tpl));
             pdfcraft_xfa::script_objects_for(tpl, index, &ev.som)
                 .into_iter()
-                .map(|o| pdfcraft_js::xfa::ScriptObjectCode { name: o.name, som: o.som, text: o.text, bare: o.bare, unnamed: o.unnamed })
+                .map(|o| pdfcraft_js::xfa::ScriptObjectCode {
+                    name: o.name,
+                    som: o.som,
+                    text: o.text,
+                    bare: o.bare,
+                    unnamed: o.unnamed,
+                    variable: o.variable,
+                })
                 .collect()
         };
         let script = Script {

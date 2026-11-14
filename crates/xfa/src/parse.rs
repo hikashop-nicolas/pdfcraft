@@ -899,12 +899,28 @@ fn parse_script_objects(n: XmlNode, warnings: &mut Vec<String>) -> Vec<ScriptObj
             if !whole {
                 warnings.push(format!("the script object {name} is larger than {} MiB; it is left out", MAX_SCRIPT_OBJECT_TEXT >> 20));
             } else if !text.trim().is_empty() {
-                out.push(ScriptObject { name: name.to_string(), text: text.into() });
+                out.push(ScriptObject { name: name.to_string(), text: text.into(), variable: false });
+            }
+        }
+        // Document variables that hold a value (XFA 3.3 p. 375, and the element p. 885 lists): scripts read and set it
+        // through `value`.
+        let held = vars.children().filter(|c| c.is_element() && VARIABLE_KINDS.contains(&c.tag_name().name()));
+        for v in held.take(MAX_VARIABLES) {
+            let Some(name) = v.attribute("name").map(str::trim).filter(|v| is_js_identifier(v)) else { continue };
+            let text: String = v.descendants().filter(|d| d.is_text()).filter_map(|d| d.text()).collect();
+            if text.len() <= MAX_SCRIPT_OBJECT_TEXT {
+                out.push(ScriptObject { name: name.to_string(), text: text.trim().into(), variable: true });
             }
         }
     }
     out
 }
+
+/// The content elements a `<variables>` element holds as named values.
+const VARIABLE_KINDS: &[&str] = &["text", "integer", "float", "decimal", "boolean", "date", "time", "dateTime"];
+
+/// The most named values read from one `<variables>` element.
+const MAX_VARIABLES: usize = 1024;
 
 /// The longest script object read (a form's libraries reach a few hundred KiB).
 pub const MAX_SCRIPT_OBJECT_TEXT: usize = 2 << 20;

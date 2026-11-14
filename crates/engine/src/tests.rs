@@ -9262,6 +9262,22 @@ fn repeated_xfa_print_buttons_run_their_click_script() {
 }
 
 /// A script object (`<variables><script name="Calc">`) is called by its name from the scripts of its subform and below,
+/// A form's document variables (`<variables><text name="…">`, `<float name="…">`) are values its scripts read by name
+/// (XFA 3.3 p. 375).
+#[test]
+fn xfa_scripts_read_the_forms_document_variables() {
+    let template = r#"<template xmlns="http://www.xfa.org/schema/xfa-template/3.3/"><subform name="form1" layout="tb">
+<pageSet><pageArea name="p"><contentArea x="0.5in" y="0.5in" w="7.5in" h="10in"/><medium short="8.5in" long="11in"/></pageArea></pageSet>
+<variables><text name="vFormLang">EN</text><float name="rate">0.5</float></variables>
+<subform name="page" layout="tb"><field name="out" w="2in" h="0.3in"><ui><textEdit/></ui>
+<event activity="initialize"><script contentType="application/x-javascript">this.rawValue = vFormLang.value + ":" + rate.value;</script></event></field></subform>
+</subform></template>"#;
+    let mut s = Session::new();
+    let id = s.open("vars.pdf", None, Arc::new(pdfcraft_xfa::fixtures::shell(template)), None).expect("opens");
+    let out = s.get(id).unwrap().form.iter().find(|f| f.name.ends_with("out")).map(|f| f.value.clone());
+    assert_eq!(out, Some(vec!["EN:0.5".to_string()]), "{:?}", s.take_js_output(id));
+}
+
 /// from a deeper object to a shallower one, and only the ones a script uses are defined for it.
 #[test]
 fn xfa_scripts_call_the_script_objects_of_their_subform() {

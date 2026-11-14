@@ -2196,7 +2196,7 @@ mod session {
     }
 
     fn object(name: &str, som: Option<&str>, text: &str) -> ScriptObjectCode {
-        ScriptObjectCode { name: name.into(), som: som.map(str::to_string), text: text.into(), bare: true, unnamed: false }
+        ScriptObjectCode { name: name.into(), som: som.map(str::to_string), text: text.into(), bare: true, unnamed: false, variable: false }
     }
 
     /// `source` run on `total` with `objects` reachable: its result, or its error.
@@ -2222,6 +2222,19 @@ mod session {
         crate::xfa::drop_kept(b);
         assert_eq!(run(a), "3");
         crate::xfa::drop_kept(a);
+    }
+
+    /// A document variable (`<variables><text name="vFormLang">EN</text>`) is an object whose `value` a script reads and sets
+    /// by its bare name, through its subform's `variables` and through `#variables[0]`; what one script sets, the next reads.
+    #[test]
+    fn document_variables_hold_values_scripts_read_and_set() {
+        let mut s = XfaSession::new(XfaDoc { page_count: 1, ..Default::default() });
+        let var = ScriptObjectCode { variable: true, ..object("vFormLang", Some("form1[0]"), "EN") };
+        let vars = [var];
+        let read = "vFormLang.value + ',' + vFormLang.rawValue + ',' + form1.variables.vFormLang.value + ',' + xfa.resolveNode('form1.#variables[0].vFormLang').value";
+        assert_eq!(with_objects(&mut s, read, &vars).as_deref(), Ok("EN,EN,EN,EN"));
+        assert_eq!(with_objects(&mut s, "vFormLang.value = 'FR'; 1", &vars).as_deref(), Ok("1"));
+        assert_eq!(with_objects(&mut s, "vFormLang.value", &vars).as_deref(), Ok("FR"), "the next script reads what the last one set");
     }
 
     /// Script objects are compiled when a script first uses them, with every top-level member their code declares (read by

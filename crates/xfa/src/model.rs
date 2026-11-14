@@ -527,8 +527,11 @@ impl Default for Occur {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScriptObject {
     pub name: String,
-    /// Shared: every script that can reach the object is handed it.
+    /// Shared: every script that can reach the object is handed it. For a variable, the value it holds.
     pub text: std::sync::Arc<str>,
+    /// A `<variables>` text variable (`<text name="vFormLang">EN</text>`, or `integer`, `float`, `date`…): an object whose
+    /// `value` is its text, not code.
+    pub variable: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

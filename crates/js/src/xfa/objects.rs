@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use boa_engine::interner::Interner;
+use boa_engine::object::ObjectInitializer;
 use boa_engine::parser::Parser;
 use boa_engine::property::Attribute;
-use boa_engine::{Context, JsNativeError, JsResult, JsValue, NativeFunction, Source, js_string};
+use boa_engine::{Context, JsNativeError, JsResult, JsString, JsValue, NativeFunction, Source, js_string};
 
 use super::host::host;
 use super::model::XfaKind;
@@ -29,6 +30,8 @@ pub struct ScriptObjectCode {
     pub bare: bool,
     /// No event script names it: loaded once an object its code names has loaded, as a module extending it.
     pub unnamed: bool,
+    /// A document variable (`<variables><text name="…">`): `text` is the value it holds, read and set as `value`.
+    pub variable: bool,
 }
 
 /// The most script object code one script may have compiled: each object is at most 2 MiB, and a script reaching many large
@@ -237,6 +240,17 @@ fn load(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
         let this = o.som.as_deref().and_then(|som| h.nodes.iter().position(|n| &*n.som == som && n.kind != XfaKind::Form));
         (o, this)
     };
+    // A document variable holds a value, not code: an object whose `value` (and `rawValue`) a script reads and sets, kept
+    // like any object for the session's scripts.
+    if object.variable {
+        let value: JsValue = JsString::from(&*object.text).into();
+        let o = ObjectInitializer::new(ctx)
+            .property(js_string!("value"), value.clone(), Attribute::all())
+            .property(js_string!("rawValue"), value, Attribute::all())
+            .property(js_string!("name"), JsString::from(object.name.as_str()), Attribute::READONLY)
+            .build();
+        return Ok(o.into());
+    }
     let failed = |why: String| JsNativeError::error().with_message(format!("the script object {} did not load: {why}", object.name));
     if let Some(why) = crate::run::refuse_nesting(&object.text) {
         return Err(failed(why).into());
