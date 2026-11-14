@@ -56,6 +56,7 @@ fn request_json(r: &Request) -> Value {
         Request::Focus(f) => json!({"type": "focus", "field": f}),
         Request::Beep => json!({"type": "beep"}),
         Request::SaveAs => json!({"type": "saveAs"}),
+        Request::OpenDoc(path) => json!({"type": "openDoc", "path": path}),
         Request::ShowPanel(p) => json!({"type": "panel", "panel": p.id()}),
         Request::FocusField { name, .. } => json!({"type": "focus", "field": name}),
         Request::Zoom(z) => json!({"type": "zoom", "zoom": z}),
