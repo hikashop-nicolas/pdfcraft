@@ -261,6 +261,7 @@ pub(crate) fn value_bytes(v: &Value) -> usize {
             data.len().saturating_add(content_type.len()).saturating_add(href.as_ref().map_or(0, String::len))
         }
         Value::Empty | Value::Line { .. } | Value::Rectangle(_) => 0,
+        Value::Arc(_) => std::mem::size_of::<crate::model::ArcShape>(),
     }
 }
 

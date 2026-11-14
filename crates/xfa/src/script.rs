@@ -2188,7 +2188,7 @@ mod script_object_tests {
             Node::Subform(Box::new(Subform { common: named(name), script_objects: objects, children, ..Default::default() }))
         };
         let calc = |text: &str| ScriptObject { name: "Calc".into(), text: text.into(), variable: false };
-        let tpl = Template {
+        let mut tpl = Template {
             root: Subform {
                 common: named("form"),
                 children: vec![
@@ -2200,6 +2200,7 @@ mod script_object_tests {
             },
             ..Default::default()
         };
+        crate::numbering::number(&mut tpl.root);
         let calc_text = |som: &str| reach(&tpl, som).into_iter().find(|o| o.name == "Calc" && o.bare).map(|o| o.text.to_string());
         assert_eq!(calc_text("form[0].page[0].f[0]").as_deref(), Some("var first = 1;"));
         assert_eq!(calc_text("form[0].page[1].f[0]").as_deref(), Some("var second = 2;"));
