@@ -352,15 +352,21 @@ fn node_get(_: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
         return Ok(JsValue::undefined());
     }
     let key = text(&key, ctx)?;
+    // `.#name`: the attribute itself, whatever the children are called (XFA 3.3 p. 99)
+    let (key, attribute) = match key.strip_prefix('#').filter(|k| SHADOWED_ATTRIBUTES.contains(k)) {
+        Some(k) => (k.to_string(), true),
+        None => (key, false),
+    };
     let snapshot = {
         let h = host(ctx)?.borrow();
         let Some(n) = h.nodes.get(idx) else { return Ok(JsValue::undefined()) };
         (n.name.clone(), n.som.clone(), n.kind, n.value.clone(), n.presence.clone(), n.access.clone(), n.index, n.parent, n.children.clone())
     };
     let (name, som, kind, value, presence, access, index, parent, children) = snapshot;
-    // A child named like one of the members read from the properties comes first, as for the
-    // properties themselves (XFA 3.3 p. 99).
-    let shadowing = if props::NODE_MEMBERS.contains(&key.as_str()) { child_named(&host(ctx)?.borrow(), idx, &key) } else { None };
+    // A child named like an attribute, or like one of the members read from the properties, comes first (XFA 3.3 p. 99:
+    // `Detail.name` is the field named `name`).
+    let shadows = !attribute && (props::NODE_MEMBERS.contains(&key.as_str()) || SHADOWED_ATTRIBUTES.contains(&key.as_str()));
+    let shadowing = if shadows { child_named(&host(ctx)?.borrow(), idx, &key) } else { None };
     if let Some(c) = shadowing {
         return node_object(ctx, c);
     }
@@ -539,6 +545,10 @@ fn node_to_string(this: &JsValue, _: &[JsValue], ctx: &mut Context) -> JsResult<
     let idx = node_index(this, ctx)?;
     Ok(s(&host(ctx)?.borrow().nodes.get(idx).map(|n| n.value.clone()).unwrap_or_default()))
 }
+
+/// A container's attributes a script reads as members, which a child of the same name takes over (XFA 3.3 p. 99).
+const SHADOWED_ATTRIBUTES: &[&str] =
+    &["name", "x", "y", "w", "h", "minH", "maxH", "minW", "maxW", "presence", "access", "relevant", "locale", "layout", "colSpan"];
 
 /// Node members not modelled yet: a read gives an object that takes any read or write
 /// ([`sink`]) unless a child has the name.

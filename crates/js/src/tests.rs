@@ -1084,6 +1084,25 @@ mod xfa_model {
         assert_eq!(o.result.as_deref(), Some("form1,table,4,null"), "{o:?}");
     }
 
+    /// A child named like an attribute comes first, and `.#name` is the attribute (XFA 3.3 p. 99): `contactInfo.name.first`
+    /// reaches the subform named `name`.
+    #[test]
+    fn a_child_named_like_an_attribute_comes_first() {
+        let mut f = form();
+        if let Some(page) = f.children.first_mut() {
+            page.children.push(XfaNode {
+                name: "name".into(),
+                som: "form1[0].page1[0].name[0]".into(),
+                kind: Some(XfaKind::Subform),
+                presence: "hidden".into(),
+                ..Default::default()
+            });
+        }
+        let ev = XfaEvent { activity: "calculate".into(), target: "form1[0].page1[0].qty[0]".into(), ..Default::default() };
+        let o = run_xfa("page1.name.presence + ',' + page1['#name'] + ',' + qty.name", &ev, &XfaDoc::default(), &f, Limits::default());
+        assert_eq!(o.result.as_deref(), Some("hidden,page1,qty"), "{o:?}");
+    }
+
     /// What forms ask of the form beyond the model takes the call: structure changes from a script (`nodes.append`,
     /// `createNode`), the document an event's target stands for (`event.target.URL`, `resetForm`), and template parts
     /// the host does not hold (`total.caption.value.#text`).
