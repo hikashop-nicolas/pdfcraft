@@ -1753,6 +1753,10 @@ pub(crate) fn list_object(ctx: &mut Context, items: Vec<(usize, String)>) -> JsR
         .property(js_string!("length"), JsValue::from(len as f64), Attribute::READONLY)
         .property(js_string!("item"), item_fn, Attribute::all())
         .property(js_string!("namedItem"), named, Attribute::all())
+        // changes to the template's structure from a script are not made here
+        .function(NativeFunction::from_fn_ptr(super::nodes::noop), js_string!("append"), 1)
+        .function(NativeFunction::from_fn_ptr(super::nodes::noop), js_string!("insert"), 2)
+        .function(NativeFunction::from_fn_ptr(super::nodes::noop), js_string!("remove"), 1)
         .build()
         .into())
 }

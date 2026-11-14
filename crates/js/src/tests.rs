@@ -1092,6 +1092,7 @@ mod xfa_model {
         let cases = [
             ("var n = xfa.form.createNode('extras', 'g'); this.nodes.append(n); this.nodes.remove(n); this.nodes.insert(n, n); 1", "1"),
             ("typeof this.createNode", "function"),
+            ("var g = xfa.form.createNode('extras', 'g'); this.extras.nodes.append(g); this.extras.nodes.remove(g); 1", "1"),
             ("this.URL + ',' + this.numPages + ',' + typeof this.resetForm + ',' + this.dirty", "f.pdf,3,function,false"),
             ("xfa.resolveNode('form1.page1.total.caption.value.#text') !== null", "true"),
             ("xfa.resolveNode('form1.page1.nothing.caption') === null", "true"),
