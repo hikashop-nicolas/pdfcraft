@@ -337,6 +337,12 @@ fn find_container<'a>(n: &'a FormNode, som: &str, depth: usize) -> Option<&'a Fo
     n.children.iter().find_map(|c| find_container(c, som, depth + 1))
 }
 
+/// Whether a script asks where objects were laid out (`xfa.layout.h(this)`, `$layout.page(…)`, `pageContent(…)`): only those
+/// lay the form out for it (a `relayout()` or a page count doesn't).
+fn asks_where(script: &str) -> bool {
+    ["layout.x(", "layout.y(", "layout.w(", "layout.h(", "layout.page(", "pageSpan(", "pageContent("].iter().any(|call| script.contains(call))
+}
+
 fn has_node(n: &FormNode, som: &str, depth: usize) -> bool {
     depth <= 64 && (n.som == som || n.children.iter().any(|c| has_node(c, som, depth + 1)))
 }
@@ -546,6 +552,9 @@ struct Runner<'a, 'b> {
     pending_bytes: usize,
     /// Every script object of the template, read the first time a script needs it.
     object_index: Option<pdfcraft_xfa::ScriptObjectIndex>,
+    /// Where the form's objects were laid out as `js_root` holds the form, for the scripts that ask (`xfa.layout`): worked out
+    /// for the first of them, dropped with `js_root`.
+    boxes: Option<Arc<Vec<pdfcraft_js::xfa::XfaBox>>>,
     /// The script engine for this event: one thread for all its scripts, each run in a fresh
     /// context on the form as it is then (`cached`, kept up to date in place for values and
     /// rebuilt when the structure changed).
@@ -602,6 +611,7 @@ impl<'a, 'b> Runner<'a, 'b> {
             pending_props: Vec::new(),
             pending_bytes: 0,
             object_index: None,
+            boxes: None,
             session: None,
             changes: Changes::default(),
             numbered: HashSet::new(),
@@ -649,6 +659,38 @@ impl<'a, 'b> Runner<'a, 'b> {
         self.js_root = None;
     }
 
+    /// Where the form's objects are laid out as it is now: laid out here once, until the form changes.
+    fn layout_boxes(&mut self) -> Arc<Vec<pdfcraft_js::xfa::XfaBox>> {
+        if let Some(b) = &self.boxes {
+            return Arc::clone(b);
+        }
+        let laid = pdfcraft_xfa::apply_overrides(self.tpl, &self.ov);
+        // a form that doesn't lay out answers 0 and the current page, as before
+        let boxes: Vec<pdfcraft_js::xfa::XfaBox> = match pdfcraft_xfa::layout_with_overrides(&laid, self.data.as_ref(), &self.ov) {
+            Ok(form) => form
+                .pages
+                .iter()
+                .enumerate()
+                .flat_map(|(page, p)| {
+                    p.boxes.iter().map(move |b| pdfcraft_js::xfa::XfaBox {
+                        som: b.som.clone(),
+                        class: b.class.to_string(),
+                        page,
+                        x: b.rect.x,
+                        y: b.rect.y,
+                        w: b.rect.w,
+                        h: b.rect.h,
+                        master: b.master,
+                    })
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        let boxes = Arc::new(boxes);
+        self.boxes = Some(Arc::clone(&boxes));
+        boxes
+    }
+
     /// A property change for the scripts that follow in this event: with the copy of the form
     /// they are given, rather than in a new copy of it, up to [`MAX_PENDING_PROPS`] changes
     /// and [`MAX_PENDING_PROP_BYTES`] of them.
@@ -662,6 +704,8 @@ impl<'a, 'b> Runner<'a, 'b> {
             return;
         }
         self.pending_bytes = bytes;
+        // a property can move or size what was laid out
+        self.boxes = None;
         self.pending_props.push(pdfcraft_js::xfa::XfaPropSet {
             som: som.to_string(),
             path: path.to_string(),
@@ -1327,6 +1371,8 @@ impl<'a, 'b> Runner<'a, 'b> {
             Some(r) => Arc::clone(r),
             None => {
                 self.pending_props.clear();
+                // the form changed since the boxes were worked out
+                self.boxes = None;
                 self.pending_bytes = 0;
                 #[cfg(test)]
                 counts::bump(&counts::SNAPSHOTS);
@@ -1355,6 +1401,8 @@ impl<'a, 'b> Runner<'a, 'b> {
                 })
                 .collect()
         };
+        // laid out only for the scripts that ask where things are, not for each one
+        let layout = if !ev.formcalc && asks_where(&ev.script) { self.layout_boxes() } else { Default::default() };
         let script = Script {
             objects,
             source: ev.script.clone(),
@@ -1364,6 +1412,7 @@ impl<'a, 'b> Runner<'a, 'b> {
             limits: limits_for(&ev.activity),
             timeout: timeout_for(&ev.activity).saturating_mul(self.run.time_scale),
             props: self.pending_props.clone(),
+            layout,
         };
         let o = self.session().run(script);
         if o.abandoned {

@@ -77,6 +77,23 @@ pub struct XfaEvent {
     pub prev_text: String,
 }
 
+/// Where a named object of the form was laid out: what `xfa.layout` tells a script.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct XfaBox {
+    pub som: String,
+    /// `subform`, `field`, `draw`, `exclGroup` or `area`.
+    pub class: String,
+    /// The page, 0-based.
+    pub page: usize,
+    /// In points from the page's top left.
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    /// Part of the page area's own content (its master page), not of the flow.
+    pub master: bool,
+}
+
 /// About the document.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct XfaDoc {

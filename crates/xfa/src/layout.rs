@@ -32,7 +32,7 @@ pub(crate) use common::date_pattern;
 pub use common::formatted_value;
 use common::{collect_names, collect_values};
 pub(crate) use items::UNDERLINE_DROP;
-pub use items::{Action, BorderShape, EllipseArc, Form, Item, Page, Rounded, Turned, Widget, WidgetBorder, WidgetKind};
+pub use items::{Action, BorderShape, EllipseArc, Form, Item, LayoutBox, Page, Rounded, Turned, Widget, WidgetBorder, WidgetKind};
 
 /// Most pages a form may lay out to.
 pub const MAX_PAGES: usize = 500;
@@ -218,7 +218,12 @@ struct Layouter<'t> {
     /// The pages' copies of master content that overrides changed, kept for the whole layout so
     /// their addresses stay unique (the measurement cache keys on them).
     master_copies: Vec<Rc<Vec<Node>>>,
+    /// Drawing a page area's own content: the boxes noted are the master page's ([`LayoutBox::master`]).
+    in_master: bool,
 }
+
+/// The most objects noted on one page for `xfa.layout`: past it, the page notes no more.
+pub const MAX_LAYOUT_BOXES: usize = 20_000;
 
 /// How many instances of a repeating subform to lay out: what the data holds once it holds
 /// any (rows added or removed), else the template's initial count; never below one, never
@@ -306,6 +311,7 @@ fn layout_inner(tpl: &Template, data: Option<&DataNode>, overrides: Option<&crat
         frames: Vec::new(),
         overrides,
         master_copies: Vec::new(),
+        in_master: false,
     };
     let ctx = Ctx { font: Font::default(), para: Para::default(), som: String::new() };
     l.new_page()?;

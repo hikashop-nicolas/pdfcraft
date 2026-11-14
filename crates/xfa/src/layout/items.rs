@@ -178,6 +178,18 @@ pub struct Page {
     pub items: Vec<Item>,
     /// The name of the page area the page was made from (`None` for an unnamed one).
     pub area: Option<String>,
+    /// Where each named object of the form was laid out on this page, for `xfa.layout` in a script.
+    pub boxes: Vec<LayoutBox>,
+}
+
+/// A named object of the form on a page: its SOM path, its class (`subform`, `field`, …) and where it was laid out.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutBox {
+    pub som: String,
+    pub class: &'static str,
+    pub rect: Rect,
+    /// Part of the page area's own content (its master page), not of the flow.
+    pub master: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]

@@ -161,7 +161,7 @@ impl Layouter<'_> {
         if let Some(u) = self.uses.get_mut(idx) {
             *u += 1;
         }
-        self.pages.push(Page { width: area.width, height: area.height, items: Vec::new(), area: area.name.clone() });
+        self.pages.push(Page { width: area.width, height: area.height, items: Vec::new(), area: area.name.clone(), boxes: Vec::new() });
         let content = area.content.first().copied().unwrap_or(Rect::new(0.0, 0.0, area.width, area.height));
         self.cur = Some(Cursor { area: idx, content: 0, rect: content, y: content.y, placed: false });
         // Master page content: positioned draws and fields. The page area's own SOM index counts
@@ -189,7 +189,9 @@ impl Layouter<'_> {
         // The master page's own objects: shown where they say, whatever the body was drawing
         // when it needed this page.
         let body = std::mem::replace(&mut self.views, Views::ALL);
+        self.in_master = true;
         let drawn = items.iter().enumerate().try_for_each(|(i, item)| self.draw_positioned_child(item, page_rect, &ctx, 1, sibs.at(i)));
+        self.in_master = false;
         self.views = body;
         drawn
     }

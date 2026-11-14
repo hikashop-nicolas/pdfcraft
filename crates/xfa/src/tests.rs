@@ -8361,3 +8361,28 @@ fn som_paths_several_objects_share_are_told() {
         assert_eq!(shared(som), n > 1, "{som}: {n} owner(s)");
     }
 }
+
+/// Where each named object drawn in place lands (a field, a draw, a positioned subform) is noted on its page for the scripts that ask (`xfa.layout`), under the SOM path the
+/// live form gives it: the flow's objects, and the page area's own, marked as master content, with the page area's index
+/// counting the pages made from it.
+#[test]
+fn the_layout_notes_where_each_named_object_landed() {
+    let form = layout_xml(&crate::fixtures::repeated_print_button_template()).unwrap();
+    assert_eq!(form.pages.len(), 3);
+    let second = &form.pages[1].boxes;
+    let note = second.iter().find(|b| b.som == "form[0].page2[0].note2[0]").expect("the field is noted on its page");
+    assert_eq!((note.class, note.rect.w, note.rect.h, note.master), ("field", 200.0, 25.0, false));
+    let button = second.iter().find(|b| b.som == "master[1].PrintButton1[0]").expect("the page's own button is noted");
+    assert_eq!((button.rect.x, button.rect.y, button.master), (36.0, 24.0, true));
+    assert!(!second.iter().any(|b| b.som.contains("note1")));
+    // the live form calls them by the same paths
+    let (tpl, _) = crate::parse(&crate::fixtures::repeated_print_button_template()).unwrap();
+    let live = form_tree(&tpl, None, &Overrides::default());
+    let mut soms = Vec::new();
+    fn walk(n: &crate::script::FormNode, out: &mut Vec<String>) {
+        out.push(n.som.clone());
+        n.children.iter().for_each(|c| walk(c, out));
+    }
+    walk(&live.root, &mut soms);
+    assert!(soms.iter().any(|s| s == "form[0].page2[0].note2[0]"), "{soms:?}");
+}

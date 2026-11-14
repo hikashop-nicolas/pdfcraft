@@ -2275,7 +2275,47 @@ mod session {
             limits: Limits::default(),
             timeout: std::time::Duration::from_secs(3),
             props: Vec::new(),
+            layout: Default::default(),
         }
+    }
+
+    /// `xfa.layout` answers from where the caller laid the form's objects out: the box an object was laid out in, in the unit
+    /// asked for, its page and page span, and a page's objects of a class, the page area's own or the flow's. An object the
+    /// layout didn't place measures 0 and is on the current page.
+    #[test]
+    fn xfa_layout_answers_from_where_the_objects_were_laid_out() {
+        let at = |som: &str, page: usize, x: f64, master: bool| crate::xfa::XfaBox {
+            som: som.into(),
+            class: "field".into(),
+            page,
+            x,
+            y: 72.0,
+            w: 144.0,
+            h: 36.0,
+            master,
+        };
+        let boxes = vec![
+            at("form1[0].page1[0].qty[0]", 0, 36.0, false),
+            at("form1[0].page1[0].total[0]", 1, 72.0, false),
+            at("form1[0].page1[0].total[0]", 2, 72.0, false),
+            at("form1[0].page1[0].price[0]", 1, 0.0, true),
+        ];
+        let mut s = XfaSession::new(XfaDoc { page: 4, page_count: 5, ..Default::default() });
+        let mut run = |src: &str| {
+            let mut sc = script(src, false, "form1[0].page1[0].total[0]", "calculate");
+            sc.layout = std::sync::Arc::new(boxes.clone());
+            let o = s.run(sc);
+            o.error.map_or(o.result.unwrap_or_default(), |e| e)
+        };
+        assert_eq!(
+            run("[xfa.layout.x(qty), xfa.layout.w(qty, 'pt'), xfa.layout.h(qty, 'mm'), xfa.layout.y(qty, 'cm')].join(',')"),
+            "0.5,144,12.7,2.54"
+        );
+        assert_eq!(run("xfa.layout.page(this) + ',' + xfa.layout.pageSpan(this) + ',' + xfa.layout.page(qty)"), "2,2,1");
+        assert_eq!(run("var note = details.note; xfa.layout.page(note) + ',' + xfa.layout.w(note) + ',' + xfa.layout.pageSpan(note)"), "5,0,0");
+        let content = "var a = xfa.layout.pageContent(1, 'field', false), b = xfa.layout.pageContent(1, '', true); \
+                       a.length + ':' + a.item(0).name + ',' + b.length + ':' + b.item(0).name + ',' + xfa.layout.pageContent(1, 'draw', false).length";
+        assert_eq!(run(content), "1:total,1:price,0");
     }
 
     /// The scripts of an event given the same form start from one flattened copy of it: the
@@ -2386,6 +2426,7 @@ mod session {
                 &sc.event,
                 &XfaDoc::default(),
                 (sc.root, &sc.props),
+                Default::default(),
                 true,
                 session,
                 sc.limits,

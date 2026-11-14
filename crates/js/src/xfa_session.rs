@@ -50,6 +50,9 @@ pub struct Script {
     /// Property changes earlier scripts of the event made since `root` was built, which the
     /// script sees as part of the form (so the caller needn't build a new `root` for each).
     pub props: Vec<crate::xfa::XfaPropSet>,
+    /// Where the form's objects were laid out, for `xfa.layout`: send the same `Arc` while the form is unchanged, or none
+    /// when the script doesn't ask.
+    pub layout: std::sync::Arc<Vec<crate::xfa::XfaBox>>,
 }
 
 /// A new session's number.
@@ -80,7 +83,7 @@ fn run_script(s: Script, doc: &XfaDoc, session: u64, started: &dyn Fn()) -> XfaO
         started();
         return XfaOutcome { error: Some(why), ..Default::default() };
     }
-    crate::xfa::run_here_with(&s.source, s.objects, &s.event, doc, (s.root, &s.props), true, session, s.limits, started)
+    crate::xfa::run_here_with(&s.source, s.objects, &s.event, doc, (s.root, &s.props), s.layout, true, session, s.limits, started)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

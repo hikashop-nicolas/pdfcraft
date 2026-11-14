@@ -174,6 +174,8 @@ pub(crate) struct XHost {
     /// A hash of the form's structure (each node's SOM and kind): the engine a session keeps serves the next script while it is
     /// the same, the objects it built pointing at the same nodes.
     pub(crate) shape: u64,
+    /// Where the form's objects were laid out, for `xfa.layout` (empty when the caller didn't lay the form out).
+    pub(crate) boxes: Arc<Vec<super::model::XfaBox>>,
 }
 
 /// See [`XHost::shape`].
@@ -244,6 +246,7 @@ impl XHost {
             objects: Vec::new(),
             loaded_bytes: 0,
             shape,
+            boxes: Default::default(),
         }
     }
 

@@ -136,11 +136,12 @@ pub(crate) fn run_here(
     limits: Limits,
     started: &dyn Fn(),
 ) -> XfaOutcome {
-    run_here_with(script, Vec::new(), event, doc, form, reuse, 0, limits, started)
+    run_here_with(script, Vec::new(), event, doc, form, Default::default(), reuse, 0, limits, started)
 }
 
 /// [`run_here`] with the script objects the script can reach, each compiled when the script first uses it. They are part of
-/// the form, so they are not held to the size a script may have, only to their own bounds and nesting.
+/// the form, so they are not held to the size a script may have, only to their own bounds and nesting; and where the form's
+/// objects were laid out (`boxes`), which `xfa.layout` answers from.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_here_with(
     script: &str,
@@ -148,6 +149,7 @@ pub(crate) fn run_here_with(
     event: &XfaEvent,
     doc: &XfaDoc,
     form: super::FormCopy,
+    boxes: Arc<Vec<super::model::XfaBox>>,
     reuse: bool,
     session: u64,
     limits: Limits,
@@ -162,6 +164,7 @@ pub(crate) fn run_here_with(
     let (root, preset) = form;
     let mut host_state = XHost::new(root, reuse, &event.target, doc);
     host_state.preset(preset);
+    host_state.boxes = boxes;
     host_state.objects = if keep { objects } else { Vec::new() };
     let current = host_state.current;
     let shape = host_state.shape;
