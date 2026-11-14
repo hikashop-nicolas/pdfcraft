@@ -734,6 +734,27 @@ pub fn set_document_script(doc: &mut Document, name: &str, js: Option<&str>) -> 
 /// Run a JavaScript: set (or remove, with `None`) field `name`'s script for `event` — one of
 /// `keystroke`, `format`, `validate`, `calculate` (the field's `/AA` K, F, V, C) or `mouse_up`
 /// (its widgets' `/A`). Calculated fields join the calculation order (`/CO`).
+/// Field `name`'s keystroke, format, validate and calculate scripts as written, as `(event, source)` for the ones it has
+/// (the field dictionary's, or its only widget's when the field has none), built-in format calls included.
+pub fn field_scripts(doc: &Document, name: &str) -> Result<Vec<(&'static str, String)>, FormError> {
+    let all = fields(doc);
+    let f = all.iter().find(|f| f.name == name).ok_or_else(|| FormError::NoSuchField(name.into()))?;
+    let aa_of = |o: ObjRef| doc.get(o).as_dict().and_then(|d| d.get(b"AA").map(|a| doc.resolve(a))).and_then(|a| a.as_dict().cloned());
+    let only_widget = || match f.widgets.as_slice() {
+        [w] => aa_of(w.obj),
+        _ => None,
+    };
+    let Some(aa) = aa_of(f.obj).or_else(only_widget) else { return Ok(Vec::new()) };
+    let mut budget = crate::read::script_budget();
+    let mut out = Vec::new();
+    for (event, key) in [("keystroke", &b"K"[..]), ("format", b"F"), ("validate", b"V"), ("calculate", b"C")] {
+        if let Some(js) = aa.get(key).and_then(|a| crate::read::script(doc, a, &mut budget)) {
+            out.push((event, js));
+        }
+    }
+    Ok(out)
+}
+
 pub fn set_field_script(doc: &mut Document, name: &str, event: &str, js: Option<&str>) -> Result<(), FormError> {
     let all = fields(doc);
     let f = all.iter().find(|f| f.name == name).ok_or_else(|| FormError::NoSuchField(name.into()))?;

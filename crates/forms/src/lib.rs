@@ -32,7 +32,7 @@ pub use author::{
 pub use calc_order::{CalculatedField, CalculationIssue, CalculationOrder, calculation_order, set_calculation_order};
 pub use scripting::{
     DocumentTrigger, FieldChange, FieldEvent, NoScripts, PageEvent, PageScript, ScriptResult, Scripts, apply_script_changes, document_action_scripts,
-    document_scripts, document_scripts_named, page_scripts, set_document_script, set_field_script,
+    document_scripts, document_scripts_named, field_scripts, page_scripts, set_document_script, set_field_script,
 };
 
 mod appearances;
