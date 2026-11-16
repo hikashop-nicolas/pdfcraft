@@ -1848,8 +1848,11 @@ fn display_picture_of(props: &Props) -> Option<String> {
     picture.text.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string)
 }
 
-/// The data tree of a document's datasets packet.
+/// The data tree of a document's datasets packet. When the packets are an array, only the datasets packet is read.
 pub fn data_of(doc: &Document) -> Option<DataNode> {
+    if let Some(text) = crate::packets::datasets_packet_text(doc) {
+        return crate::data::parse_datasets_packet(&text);
+    }
     crate::read_packets(doc).ok().flatten().and_then(|p| parse_datasets(&p.xdp))
 }
 

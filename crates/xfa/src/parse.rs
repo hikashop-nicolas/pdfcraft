@@ -146,7 +146,8 @@ fn parse_border(n: Option<XmlNode>) -> Option<Border> {
 fn parse_fill_kind(n: Option<XmlNode>) -> FillKind {
     let Some(n) = n else { return FillKind::Solid };
     // The last one: a template has one; a script that gives a fill another type adds it after.
-    let Some(k) = n.children().filter(|c| c.is_element() && matches!(c.tag_name().name(), "pattern" | "linear" | "radial" | "stipple" | "solid")).last()
+    let Some(k) =
+        n.children().filter(|c| c.is_element() && matches!(c.tag_name().name(), "pattern" | "linear" | "radial" | "stipple" | "solid")).last()
     else {
         return FillKind::Solid;
     };
