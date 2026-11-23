@@ -62,6 +62,10 @@ fn request_json(r: &Request) -> Value {
         Request::Zoom(z) => json!({"type": "zoom", "zoom": z}),
         Request::Highlight(on) => json!({"type": "highlight", "on": on}),
         Request::OpenAttachment { name, open } => json!({"type": "attachment", "name": name, "open": open}),
+        Request::SpawnTemplate { name, page, rename, overlay } => {
+            json!({"type": "spawnTemplate", "name": name, "page": page, "rename": rename, "overlay": overlay})
+        }
+        Request::SetTemplateHidden { name, hidden } => json!({"type": "templateHidden", "name": name, "hidden": hidden}),
     }
 }
 

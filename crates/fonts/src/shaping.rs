@@ -28,7 +28,9 @@ pub enum ShapedScript {
     Arabic,
     Hebrew,
     Thai,
-    /// Latin, Greek and Cyrillic letters WinAnsi lacks, in the bundled Inter face.
+    /// Latin, Greek and Cyrillic letters in the bundled Inter face
+    /// ([`crate::document_latin_fonts`]), which every build has: for the ones WinAnsiEncoding
+    /// lacks, beside the standard font that draws the rest.
     Latin,
     /// Japanese and Chinese characters (and kana, and what else the face has), in the Japanese craft-fonts face.
     Cjk,
@@ -39,7 +41,7 @@ pub enum ShapedScript {
 }
 
 impl ShapedScript {
-    pub fn font(self) -> Option<&'static crate::CraftFont> {
+    pub fn font(self) -> Option<&'static crate::EmbeddedFace> {
         match self {
             Self::Arabic => crate::document_arabic_font(),
             Self::Hebrew => crate::document_hebrew_font(false),
@@ -113,22 +115,22 @@ pub fn shape_thai(text: &str) -> Result<Vec<ShapedCluster>, GlyphError> {
 
 /// Whether the bundled Inter face has a glyph for `c`.
 pub fn latin_has(c: char) -> bool {
-    face(ShapedScript::Latin).is_some_and(|(font, _)| font.charmap().map(c).is_some())
+    face(ShapedScript::Latin).is_some_and(|(font, _)| font.charmap().map(c).is_some_and(|g| g.to_u32() != 0))
 }
 
 /// Whether the Japanese craft-fonts face has a glyph for `c` (false without the face).
 pub fn cjk_has(c: char) -> bool {
-    face(ShapedScript::Cjk).is_some_and(|(font, _)| font.charmap().map(c).is_some())
+    face(ShapedScript::Cjk).is_some_and(|(font, _)| font.charmap().map(c).is_some_and(|g| g.to_u32() != 0))
 }
 
 /// Whether the Simplified Chinese craft-fonts face has a glyph for `c` (false without the face).
 pub fn hans_has(c: char) -> bool {
-    face(ShapedScript::Hans).is_some_and(|(font, _)| font.charmap().map(c).is_some())
+    face(ShapedScript::Hans).is_some_and(|(font, _)| font.charmap().map(c).is_some_and(|g| g.to_u32() != 0))
 }
 
 /// Whether the Korean craft-fonts face has a glyph for `c` (false without the face).
 pub fn hang_has(c: char) -> bool {
-    face(ShapedScript::Hang).is_some_and(|(font, _)| font.charmap().map(c).is_some())
+    face(ShapedScript::Hang).is_some_and(|(font, _)| font.charmap().map(c).is_some_and(|g| g.to_u32() != 0))
 }
 
 /// Shape a run of Korean text with the `Hang` craft-fonts face, one cluster per character.
@@ -141,14 +143,36 @@ pub fn shape_hans(text: &str) -> Result<Vec<ShapedCluster>, GlyphError> {
     shape_script(text, false, ShapedScript::Hans)
 }
 
-/// Shape a left-to-right run of Latin, Greek or Cyrillic text with the bundled Inter face.
+/// Shape a run of Japanese or Chinese text with the Japanese craft-fonts face, one cluster per character.
+pub fn shape_cjk(text: &str) -> Result<Vec<ShapedCluster>, GlyphError> {
+    shape_script(text, false, ShapedScript::Cjk)
+}
+
+/// Shape a left-to-right run of Latin, Greek or Cyrillic `text` with the bundled Inter face,
+/// accents and other marks kept with their letter. [`GlyphError::Missing`] when the face lacks a
+/// character.
 pub fn shape_latin(text: &str) -> Result<Vec<ShapedCluster>, GlyphError> {
     shape_script(text, false, ShapedScript::Latin)
 }
 
-/// Shape a run of Japanese or Chinese text with the Japanese craft-fonts face, one cluster per character.
-pub fn shape_cjk(text: &str) -> Result<Vec<ShapedCluster>, GlyphError> {
-    shape_script(text, false, ShapedScript::Cjk)
+/// The scripts the bundled face's runs are shaped as.
+#[derive(Clone, Copy, PartialEq)]
+enum LatinRun {
+    Latin,
+    Greek,
+    Cyrillic,
+}
+
+/// The script of a run for the bundled face: that of its first Greek or Cyrillic letter, else
+/// Latin.
+fn latin_run(text: &str) -> LatinRun {
+    text.chars()
+        .find_map(|c| match u32::from(c) {
+            0x0370..=0x03FF | 0x1F00..=0x1FFF => Some(LatinRun::Greek),
+            0x0400..=0x052F | 0x1C80..=0x1C8F | 0x2DE0..=0x2DFF | 0xA640..=0xA69F => Some(LatinRun::Cyrillic),
+            _ => None,
+        })
+        .unwrap_or(LatinRun::Latin)
 }
 
 fn shape_script(text: &str, rtl: bool, kind: ShapedScript) -> Result<Vec<ShapedCluster>, GlyphError> {
@@ -159,13 +183,18 @@ fn shape_script(text: &str, rtl: bool, kind: ShapedScript) -> Result<Vec<ShapedC
     buffer.push_str(text);
     buffer.set_direction(if rtl { Direction::RightToLeft } else { Direction::LeftToRight });
     match kind {
+        // Kana, kanji and Latin can share one run: let the shaper read the script off the text.
+        ShapedScript::Cjk | ShapedScript::Hans | ShapedScript::Hang => buffer.guess_segment_properties(),
         ShapedScript::Arabic => buffer.set_script(script::ARABIC),
         ShapedScript::Hebrew => buffer.set_script(script::HEBREW),
         ShapedScript::Thai => buffer.set_script(script::THAI),
-        // Mixed scripts in one run: let the shaper read them off the text.
-        ShapedScript::Latin | ShapedScript::Cjk | ShapedScript::Hans | ShapedScript::Hang => buffer.guess_segment_properties(),
+        ShapedScript::Latin => buffer.set_script(match latin_run(text) {
+            LatinRun::Greek => script::GREEK,
+            LatinRun::Cyrillic => script::CYRILLIC,
+            LatinRun::Latin => script::LATIN,
+        }),
     }
-    // Preserve the historical Arabic per-character mapping; the others keep marks with their base.
+    // Preserve the historical Arabic per-character mapping; Hebrew, Thai and Latin marks stay with their base.
     buffer.set_cluster_level(match kind {
         ShapedScript::Arabic | ShapedScript::Cjk | ShapedScript::Hans | ShapedScript::Hang => BufferClusterLevel::Characters,
         ShapedScript::Hebrew | ShapedScript::Thai | ShapedScript::Latin => BufferClusterLevel::MonotoneGraphemes,

@@ -97,7 +97,8 @@ pub(super) fn draw_laid_shaped(
             ShapedScript::Arabic => arabic_error(e, &c.text),
             ShapedScript::Hebrew => hebrew_error(e, &c.text),
             ShapedScript::Thai => thai_error(e, &c.text),
-            ShapedScript::Latin | ShapedScript::Cjk | ShapedScript::Hans | ShapedScript::Hang => fallback_error(e, &c.text),
+            ShapedScript::Latin => EditError::Invalid(pdfcraft_fonts::shaped_text::latin_message(e, &c.text)),
+            ShapedScript::Cjk | ShapedScript::Hans | ShapedScript::Hang => fallback_error(e, &c.text),
         })?;
     out.extend(format!("BT {}\n", t.fill_op()).bytes());
     if t.char_spacing != 0.0 {
