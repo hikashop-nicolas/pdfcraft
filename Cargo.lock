@@ -6719,7 +6719,7 @@ dependencies = [
 
 [[package]]
 name = "pdfcraft-wasm"
-version = "0.21.1"
+version = "0.22.0"
 dependencies = [
  "image",
  "js-sys",
@@ -6764,7 +6764,7 @@ dependencies = [
 
 [[package]]
 name = "pdfcraft-xfa-rules"
-version = "0.21.1"
+version = "0.22.0"
 
 [[package]]
 name = "pdfcraft-xfdf"
