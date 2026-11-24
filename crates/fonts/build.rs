@@ -18,6 +18,7 @@ fn main() {
     println!("cargo::rerun-if-env-changed=CRAFT_FONTS_DIR");
     println!("cargo::rerun-if-env-changed=CRAFT_FONTS_REQUIRED");
     println!("cargo::rerun-if-env-changed=CRAFT_FONTS_EXTERNAL_CJK");
+    println!("cargo::rerun-if-env-changed=CRAFT_FONTS_EXTERNAL");
     let mut src = String::from("pub static CRAFT_FONTS: &[EmbeddedFace] = &[\n");
     let required = std::env::var_os("CRAFT_FONTS_REQUIRED").is_some();
     if let Some(dir) = std::env::var_os("CRAFT_FONTS_DIR").map(PathBuf::from) {
@@ -106,7 +107,11 @@ fn manifest(dir: &std::path::Path, manifest: &std::path::Path, wasm: bool, stric
         let ui_face = family == "BIZ UDPGothic" && style == "Regular";
         let web_face = ui_face || small_hans || small_hang || ["Arab", "Telu", "Hebr", "Thai", "Deva"].into_iter().any(has);
         // A host that loads the big CJK faces itself (`add_craft_font`) builds without them: they are the module's largest data.
-        let external = wasm && std::env::var_os("CRAFT_FONTS_EXTERNAL_CJK").is_some() && (ui_face || small_hans || small_hang);
+        // `CRAFT_FONTS_EXTERNAL` names more scripts whose faces the host supplies (`Arab,Thai,Deva,Hebr`).
+        let external_scripts = std::env::var("CRAFT_FONTS_EXTERNAL").unwrap_or_default();
+        let external = wasm
+            && ((std::env::var_os("CRAFT_FONTS_EXTERNAL_CJK").is_some() && (ui_face || small_hans || small_hang))
+                || external_scripts.split(',').map(str::trim).any(|s| !s.is_empty() && has(s)));
         if wasm && (!web_face || external) {
             continue;
         }

@@ -204,7 +204,8 @@ fn document_faces() -> Vec<&'static EmbeddedFace> {
     if let Some(d) = document_japanese_font() {
         out.push(d);
     }
-    for f in crate::CRAFT_FONTS {
+    // The built-in faces, then any a host added at run time.
+    for f in crate::craft_fonts() {
         if !out.iter().any(|d| std::ptr::eq(*d, f)) {
             out.push(f);
         }
