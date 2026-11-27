@@ -207,6 +207,20 @@ fn to_unicode(m: &Metrics, codes: &std::collections::BTreeMap<u32, (usize, u32)>
     out.into_bytes()
 }
 
+/// An encoding CMap of the codes shown to their CIDs.
+fn cid_cmap(codes: &std::collections::BTreeMap<u32, (usize, u32)>) -> Vec<u8> {
+    let entries: Vec<String> = codes.iter().map(|(code, (len, cid))| format!("<{code:0w$X}> {cid}", w = (*len).clamp(1, 4) * 2)).collect();
+    let mut out = String::from(
+        "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> def\n\
+         /CMapName /PCGlyphs def\n/CMapType 1 def\n1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n",
+    );
+    for chunk in entries.chunks(100) {
+        out.push_str(&format!("{} begincidchar\n{}\nendcidchar\n", chunk.len(), chunk.join("\n")));
+    }
+    out.push_str("endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend\n");
+    out.into_bytes()
+}
+
 /// The CID font's widths for the CIDs shown only, and its CIDToGIDMap without the others.
 fn trim_cid_font(doc: &Document, out: &mut Document, cid: &mut Dict, m: &Metrics, codes: &std::collections::BTreeMap<u32, (usize, u32)>) {
     let mut widths: std::collections::BTreeMap<u32, f64> = std::collections::BTreeMap::new();
@@ -341,6 +355,13 @@ pub fn subset_for_save(doc: &Document) -> Option<Document> {
         let metrics = codes.map(|_| Metrics::from_dict(doc, font));
         if let (Some(codes), Some(m)) = (codes, &metrics) {
             top.set(b"ToUnicode".to_vec(), Object::Ref(out.add(Object::Stream(Stream::flate(Dict::new(), &to_unicode(m, codes))))));
+            // A CFF font's codes reach their glyphs through an embedded CMap of every character.
+            if let Some(Object::Stream(enc)) = font.get(b"Encoding").map(|e| doc.resolve(e)).as_deref() {
+                let mut d = enc.dict.clone();
+                d.remove(b"Filter");
+                d.remove(b"DecodeParms");
+                top.set(b"Encoding".to_vec(), Object::Ref(out.add(Object::Stream(Stream::flate(d, &cid_cmap(codes))))));
+            }
         }
         out.set(r, Object::Dict(top));
         if let Some(Object::Ref(cid_ref)) =
