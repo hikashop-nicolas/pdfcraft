@@ -302,7 +302,7 @@ pub fn set_contents(doc: &mut Document, page: usize, index: usize, text: &str, m
     let before = annot_dict(doc, r);
     let free_text = before.name(b"Subtype") == Some(b"FreeText");
     refuse_undrawable_thai(free_text, text)?;
-    let snug = free_text && is_snug(&before);
+    let snug = free_text && is_snug(&before, appearance::chosen_face(doc, &before).as_ref());
     // The text keeps the look it is drawn with (`/DA`, or `/DS` where it sets one).
     let style = text_style::text_style(&before, text_style::dr_face(doc, &before));
     doc.update_dict(r, |d| {
@@ -344,7 +344,9 @@ fn fitted_box(doc: &Document, r: ObjRef, text: &str) -> Option<[f64; 4]> {
     let nums = |key: &[u8]| -> Option<Vec<f64>> { d.get(key)?.as_array()?.iter().map(|o| o.as_f64()).collect() };
     // Measured in the face and size the text is drawn in (`/DA`, or `/DS` where it sets one).
     let TextStyle { face, size, .. } = text_style::text_style(&d, text_style::dr_face(doc, &d));
-    let measure = |s: &str, size: f64| appearance::text_width_in(face, s, size);
+    // In its chosen face where it has one (`/PCFace`).
+    let chosen = appearance::chosen_face(doc, &d);
+    let measure = appearance::measure_in(chosen.as_ref(), face);
     let pad = 2.0 + border_width_of(&d);
     let rect = nums(b"Rect").filter(|v| v.len() == 4 && v.iter().all(|x| x.is_finite()))?;
     let rect = [rect[0], rect[1], rect[2], rect[3]];
@@ -710,9 +712,9 @@ pub(crate) fn text_box_of(d: &Dict) -> Option<[f64; 4]> {
 /// Give text box or typewriter text `d`, whose text box is `tb`, the border `shape` (`width`
 /// wide): `/Rect` around it, `/RD` and `/PCBorderShape`, or for a rectangle `/Rect` the text
 /// box itself again.
-pub(crate) fn shape_text_box(d: &mut Dict, tb: [f64; 4], shape: BorderShape, width: f64) {
+pub(crate) fn shape_text_box(d: &mut Dict, tb: [f64; 4], shape: BorderShape, width: f64, face: Option<&appearance::ChosenFace>) {
     // A circle goes around the text as the box lays it out.
-    let text = (shape == BorderShape::Circle).then(|| text_extent(d, displayed_sides(d, tb).0 - 2.0 * (2.0 + width.max(0.0))));
+    let text = (shape == BorderShape::Circle).then(|| text_extent(d, displayed_sides(d, tb).0 - 2.0 * (2.0 + width.max(0.0)), face));
     let outer = shape.around(tb, width, text);
     d.set(b"Rect".to_vec(), num_array(&outer));
     if shape == BorderShape::Rectangle {
@@ -729,11 +731,12 @@ pub(crate) fn shape_text_box(d: &mut Dict, tb: [f64; 4], shape: BorderShape, wid
 
 /// The width of the widest line and the height of the lines of FreeText `d`'s text, as its
 /// appearance lays the text out `wrap` wide.
-fn text_extent(d: &Dict, wrap: f64) -> [f64; 2] {
+fn text_extent(d: &Dict, wrap: f64, face: Option<&appearance::ChosenFace>) -> [f64; 2] {
     let text = d.get(b"Contents").and_then(|o| o.as_string()).map(PdfString::to_text).unwrap_or_default();
     let (_, size) = appearance::parse_da(d);
-    let lines = appearance::wrap(&text, size, wrap.max(1.0));
-    let widest = lines.iter().map(|l| appearance::text_width(l, size)).fold(0.0, f64::max);
+    let measure = appearance::measure_in(face, Std14::Helvetica);
+    let lines = pdfcraft_fonts::wrap_with(&text, size, wrap.max(1.0), &measure);
+    let widest = lines.iter().map(|l| measure(l, size)).fold(0.0, f64::max);
     [widest, appearance::text_lines_height(&lines, size)]
 }
 
@@ -748,10 +751,10 @@ fn displayed_sides(d: &Dict, tb: [f64; 4]) -> (f64, f64) {
 /// FreeText `d`'s text box `tb`, with a border `width` wide, made as large as its text wrapped
 /// `wrap` wide needs (its widest line and its lines, inside the padding a box sized to its text
 /// has) and centred where it was: a circle goes around this, not around a box wider than its text.
-fn snug_text_box(d: &Dict, tb: [f64; 4], width: f64, wrap: f64) -> [f64; 4] {
+fn snug_text_box(d: &Dict, tb: [f64; 4], width: f64, wrap: f64, face: Option<&appearance::ChosenFace>) -> [f64; 4] {
     let tb = normalize(tb);
     let pad = 2.0 + width.max(0.0);
-    let [w, h] = text_extent(d, wrap);
+    let [w, h] = text_extent(d, wrap, face);
     let (hx, hy) = (w / 2.0 + pad + 2.0, h / 2.0 + pad + 1.0);
     let (hx, hy) = if matches!(appearance::text_turn(d), 90 | 270) { (hy, hx) } else { (hx, hy) };
     let (cx, cy) = ((tb[0] + tb[2]) / 2.0, (tb[1] + tb[3]) / 2.0);
@@ -760,10 +763,10 @@ fn snug_text_box(d: &Dict, tb: [f64; 4], width: f64, wrap: f64) -> [f64; 4] {
 
 /// Whether FreeText `d` is a circle whose text box is snug around its text ([`snug_text_box`]):
 /// it then follows its text as that changes, where one made larger by hand keeps its size.
-fn is_snug(d: &Dict) -> bool {
+fn is_snug(d: &Dict, face: Option<&appearance::ChosenFace>) -> bool {
     let Some(tb) = text_box_of(d).filter(|_| BorderShape::of(d) == BorderShape::Circle) else { return false };
     let width = border_width_of(d);
-    let s = snug_text_box(d, tb, width, displayed_sides(d, tb).0 - 2.0 * (2.0 + width));
+    let s = snug_text_box(d, tb, width, displayed_sides(d, tb).0 - 2.0 * (2.0 + width), face);
     let tb = normalize(tb);
     ((s[2] - s[0]) - (tb[2] - tb[0])).abs() < 0.5 && ((s[3] - s[1]) - (tb[3] - tb[1])).abs() < 0.5
 }
@@ -773,7 +776,8 @@ fn is_snug(d: &Dict) -> bool {
 fn snug_refit(doc: &Document, r: ObjRef) -> Option<[f64; 4]> {
     let d = annot_dict(doc, r);
     let width = border_width_of(&d);
-    Some(snug_text_box(&d, text_box_of(&d)?, width, 300.0 - 2.0 * (2.0 + width)))
+    let face = appearance::chosen_face(doc, &d);
+    Some(snug_text_box(&d, text_box_of(&d)?, width, 300.0 - 2.0 * (2.0 + width), face.as_ref()))
 }
 
 /// Give a text box or typewriter text an oval, a circle or a rectangle for its border, and redraw
@@ -787,17 +791,18 @@ pub fn set_border_shape(doc: &mut Document, page: usize, index: usize, shape: Bo
         return Err(AnnotError::Invalid("only text boxes and typewriter text have a border shape".into()));
     }
     let tb = text_box_of(&d).ok_or_else(|| AnnotError::Invalid("the text box can't be read".into()))?;
+    let face = appearance::chosen_face(doc, &d);
     let tb = match shape {
         BorderShape::Circle => {
             let width = border_width_of(&d);
-            snug_text_box(&d, tb, width, displayed_sides(&d, tb).0 - 2.0 * (2.0 + width))
+            snug_text_box(&d, tb, width, displayed_sides(&d, tb).0 - 2.0 * (2.0 + width), face.as_ref())
         }
         _ => tb,
     };
     refuse_foreign_text(doc, &d)?;
     let before = d;
     doc.update_dict(r, |d| {
-        shape_text_box(d, tb, shape, border_width_of(d));
+        shape_text_box(d, tb, shape, border_width_of(d), face.as_ref());
         touch(d, meta);
     })?;
     redraw_or_restore(doc, r, before)
@@ -1028,6 +1033,7 @@ fn place_text_box(doc: &mut Document, r: ObjRef, rect: [f64; 4], lead: Option<&[
     };
     let (shape, width) = (BorderShape::of(&d), border_width_of(&d));
     let free_text = d.name(b"Subtype") == Some(b"FreeText");
+    let face = appearance::chosen_face(doc, &d);
     doc.update_dict(r, |d| {
         d.set(b"Rect".to_vec(), num_array(&outer));
         match &cl {
@@ -1036,7 +1042,7 @@ fn place_text_box(doc: &mut Document, r: ObjRef, rect: [f64; 4], lead: Option<&[
                 d.set(b"RD".to_vec(), num_array(&[rect[0] - outer[0], rect[1] - outer[1], outer[2] - rect[2], outer[3] - rect[3]]));
             }
             // An oval or a circle goes around the text box again.
-            None if free_text => shape_text_box(d, rect, shape, width),
+            None if free_text => shape_text_box(d, rect, shape, width, face.as_ref()),
             None => {
                 d.remove(b"RD");
             }
@@ -1180,10 +1186,11 @@ fn style_one(doc: &mut Document, r: ObjRef, change: StyleChange, meta: &Meta) ->
         let rect = grow(text_box_of(&d)?, by);
         (by != 0.0 && finite(&rect) && rect[2] - rect[0] >= 1.0 && rect[3] - rect[1] >= 1.0).then_some((rect, w.max(0.0)))
     });
+    let face = appearance::chosen_face(doc, &d);
     let before = d;
     doc.update_dict(r, |d| {
         if let Some((rect, w)) = regrow {
-            shape_text_box(d, rect, shape, w);
+            shape_text_box(d, rect, shape, w, face.as_ref());
         }
         if let Some(c) = color {
             if free_text {
@@ -1270,7 +1277,7 @@ pub fn set_font_size(doc: &mut Document, page: usize, index: usize, size: f64, m
         return Err(AnnotError::Invalid("font size must be 1\u{2013}400 pt".into()));
     }
     refuse_foreign_text(doc, &d)?;
-    let snug = is_snug(&d);
+    let snug = is_snug(&d, appearance::chosen_face(doc, &d).as_ref());
     // The face and colour the text is drawn in, which the new size keeps.
     let drawn = text_style::text_style(&d, text_style::dr_face(doc, &d));
     let before = d;
@@ -1592,6 +1599,9 @@ pub fn set_text_face(doc: &mut Document, page: usize, index: Option<usize>, byte
     if annot_dict(doc, r).name(b"Subtype") != Some(b"FreeText") {
         return Err(AnnotError::Invalid("only a text box takes a font".into()));
     }
+    // A circle snug around its text in the old face stays snug around it in the new one.
+    let before = annot_dict(doc, r);
+    let snug = is_snug(&before, appearance::chosen_face(doc, &before).as_ref());
     let font = match bytes {
         Some(bytes) => {
             let (_, name) = pdfcraft_fonts::embedding::names(bytes).map_err(AnnotError::Invalid)?;
@@ -1610,5 +1620,13 @@ pub fn set_text_face(doc: &mut Document, page: usize, index: Option<usize>, byte
         }
         touch(d, meta);
     })?;
-    draw_appearance(doc, r)
+    // The box fits its text as the new face lays it out.
+    let d = annot_dict(doc, r);
+    let text = text_value(doc, &d, b"Contents").unwrap_or_default();
+    let fit = if snug { snug_refit(doc, r) } else { fitted_box(doc, r, &text) };
+    // Like new text: what the standard face can't draw is marked, not refused.
+    match fit {
+        Some(rect) => apply_text_box(doc, r, rect, meta, true),
+        None => draw_appearance(doc, r),
+    }
 }

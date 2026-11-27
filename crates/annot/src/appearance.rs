@@ -1444,12 +1444,32 @@ fn shaped_border(
 }
 
 /// A text box's chosen face: its embedded font (`/PCFace`) and that font's metrics.
-struct ChosenFace {
+pub(crate) struct ChosenFace {
     font: ObjRef,
     metrics: pdfcraft_fonts::pdf::Metrics,
 }
 
-fn chosen_face(doc: &Document, d: &Dict) -> Option<ChosenFace> {
+impl ChosenFace {
+    /// The advance of `c` at `size`: the face's, or the standard face `std`'s for what it lacks.
+    fn char_width(&self, c: char, size: f64, std: pdfcraft_fonts::Std14) -> f64 {
+        let mut buf = [0u8; 4];
+        let s = c.encode_utf8(&mut buf);
+        let code = self.metrics.encode(s).and_then(|codes| self.metrics.codes(&codes).first().map(|(code, _)| *code));
+        code.map_or_else(|| std.text_width(s, size), |code| self.metrics.width(code) * size)
+    }
+
+    /// The width of `text` at `size`, as [`ChosenFace::char_width`] measures each character.
+    pub(crate) fn width(&self, text: &str, size: f64, std: pdfcraft_fonts::Std14) -> f64 {
+        text.chars().map(|c| self.char_width(c, size, std)).sum()
+    }
+}
+
+/// How a text box's text is measured: in its chosen face where it has one, else in `std`.
+pub(crate) fn measure_in(face: Option<&ChosenFace>, std: pdfcraft_fonts::Std14) -> impl Fn(&str, f64) -> f64 + '_ {
+    move |s, size| face.map_or_else(|| text_width_in(std, s, size), |f| f.width(s, size, std))
+}
+
+pub(crate) fn chosen_face(doc: &Document, d: &Dict) -> Option<ChosenFace> {
     let font = d.get(b"PCFace")?.as_ref()?;
     let dict = doc.get(font).as_dict()?.clone();
     (dict.name(b"Subtype") == Some(b"Type0")).then(|| ChosenFace { font, metrics: pdfcraft_fonts::pdf::Metrics::from_dict(doc, &dict) })
@@ -1490,12 +1510,7 @@ struct TextBox {
 fn draw_face_lines(out: &mut Vec<u8>, chosen: &ChosenFace, std: pdfcraft_fonts::Std14, text: &str, b: &TextBox) {
     let TextBox { rect, pad, width, size, round, q } = *b;
     let std_name = crate::text_style::resource_name(std);
-    let char_width = |c: char| {
-        let mut buf = [0u8; 4];
-        let s = c.encode_utf8(&mut buf);
-        let code = chosen.metrics.encode(s).and_then(|codes| chosen.metrics.codes(&codes).first().map(|(code, _)| *code));
-        code.map_or_else(|| std.text_width(s, size), |code| chosen.metrics.width(code) * size)
-    };
+    let char_width = |c: char| chosen.char_width(c, size, std);
     let lines = pdfcraft_fonts::wrap_with(text, size, width, |s, _| s.chars().map(char_width).sum());
     let mut y = rect[3] - pad - size * reach(&lines)[0];
     if round {

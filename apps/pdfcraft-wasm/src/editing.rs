@@ -981,6 +981,34 @@ mod tests {
     }
 
     #[test]
+    fn a_text_box_is_sized_by_its_face() {
+        let mono = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
+        let mut doc = open();
+        let name = serde_json::from_str::<Value>(&doc.register_text_font(mono).expect("registers")).expect("json")["font"]
+            .as_str()
+            .expect("name")
+            .to_string();
+        let words = "Wide letters wrap sooner in a narrow box";
+        let spec = |font: Option<&str>, y: f64| {
+            serde_json::json!({ "type": "textbox", "box": [20, y, 110, y + 20.0], "fontSize": 12, "contents": words, "font": font }).to_string()
+        };
+        doc.add_annotation(0, &spec(None, 20.0)).expect("adds in Helvetica");
+        doc.add_annotation(0, &spec(Some(&name), 150.0)).expect("adds in the face");
+        let boxes: Vec<Value> = serde_json::from_str(&doc.annotations_json(0).expect("annotations")).expect("json");
+        let height = |b: &Value| b["view"][3].as_f64().expect("y1") - b["view"][1].as_f64().expect("y0");
+        let (plain, wide) = (
+            boxes.iter().find(|b| b["font"].is_null() && b["subtype"] == "FreeText").expect("plain"),
+            boxes.iter().find(|b| !b["font"].is_null()).expect("wide"),
+        );
+        assert!(height(wide) > height(plain), "the wider face takes more lines: {} vs {}", height(wide), height(plain));
+        // Back to its own font, it fits the fewer Helvetica lines.
+        doc.set_annotation_font(0, wide["index"].as_u64().expect("index") as usize, None).expect("clears");
+        let boxes: Vec<Value> = serde_json::from_str(&doc.annotations_json(0).expect("annotations")).expect("json");
+        let again = boxes.iter().find(|b| b["index"] == wide["index"]).expect("the box");
+        assert!(height(again) < height(wide) && height(again) > height(plain), "{} vs {}", height(again), height(wide));
+    }
+
+    #[test]
     fn a_face_that_forbids_subsetting_is_saved_whole_and_restricted_ones_are_refused() {
         let with_fs_type = |fs: u16| {
             let mut font = INTER.to_vec();

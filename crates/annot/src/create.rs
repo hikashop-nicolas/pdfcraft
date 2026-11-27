@@ -511,7 +511,7 @@ pub fn add_annotation(doc: &mut Document, new: &NewAnnotation, meta: &Meta) -> R
                 let rect = fit_thai_ink(rect, turn, &new.contents, size, 2.0 + appearance::border_width(&d));
                 // An oval or a circle goes around the text box, its text wrapped as displayed:
                 // after `/PCTextRotate`, which swaps the box's sides on a quarter-turned page.
-                shape_text_box(&mut d, rect, style.border_shape, style.width);
+                shape_text_box(&mut d, rect, style.border_shape, style.width, None);
             }
         }
         _ => {}
