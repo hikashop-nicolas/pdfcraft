@@ -6725,8 +6725,11 @@ version = "0.22.0"
 dependencies = [
  "image",
  "js-sys",
+ "pdfcraft-cos",
+ "pdfcraft-edit",
  "pdfcraft-engine",
  "pdfcraft-fonts",
+ "pdfcraft-model",
  "pdfcraft-render",
  "serde_json",
  "wasm-bindgen",

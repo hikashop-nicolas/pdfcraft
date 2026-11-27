@@ -158,7 +158,7 @@ impl Pdf {
         self.inner.resize_object(page, target, rect(&view)?).map_err(js)
     }
 
-    /// Adds a text box over the displayed box. `style` is JSON: family, bold, italic, size, color, align.
+    /// Adds a text box over the displayed box. `style` is JSON: family, bold, italic, size, color, align, font.
     pub fn add_text(&mut self, page: usize, view: Vec<f64>, text: &str, style: &str) -> Result<(), JsError> {
         let style = TextStyle::parse(style).map_err(js)?;
         self.inner.add_text(page, rect(&view)?, text, &style).map_err(js)
@@ -180,6 +180,16 @@ impl Pdf {
         let target = Target { kind: Kind::parse(kind).map_err(js)?, index };
         let style = TextStyle::parse(style).map_err(js)?;
         self.inner.set_text(page, target, text.as_deref(), &style).map_err(js)
+    }
+
+    /// Keeps a font file (.ttf or .otf) for text; returns `{"font", "family"}`, `font` being what styles name.
+    pub fn register_text_font(&mut self, bytes: &[u8]) -> Result<String, JsError> {
+        self.inner.register_text_font(bytes).map_err(js)
+    }
+
+    /// The page's own fonts text can be set in, as JSON.
+    pub fn text_fonts(&self, page: usize) -> Result<String, JsError> {
+        self.inner.text_fonts_json(page).map_err(js)
     }
 
     /// Paints a white box over the displayed box.

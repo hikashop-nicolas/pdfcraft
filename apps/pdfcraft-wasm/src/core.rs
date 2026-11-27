@@ -61,6 +61,8 @@ pub struct Document {
     pub(crate) session: Session,
     pub(crate) id: DocId,
     renderer: Option<(Arc<Vec<u8>>, PageRenderer)>,
+    /// Faces the host registered for text, by PostScript name.
+    pub(crate) faces: std::collections::HashMap<String, Arc<Vec<u8>>>,
 }
 
 impl Document {
@@ -73,7 +75,7 @@ impl Document {
             OpenError::WrongPassword => OpenFailure::WrongPassword,
             other => OpenFailure::Invalid(other.to_string()),
         })?;
-        Ok(Self { session, id, renderer: None })
+        Ok(Self { session, id, renderer: None, faces: Default::default() })
     }
 
     pub(crate) fn doc(&self) -> Result<&pdfcraft_engine::Document, String> {

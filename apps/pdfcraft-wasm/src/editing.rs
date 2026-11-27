@@ -3,10 +3,12 @@
 //! page's points from its top-left, y down, so a page drawn at a scale can pass on what the person
 //! touched without doing the page geometry itself. A failure is a message, never a panic.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use pdfcraft_edit::Face;
 use pdfcraft_engine::{
-    AddedContent, AddedText, BlockStyle, Edit, FontFamily, ImageEdit, NewAnnotation, ObjectKind, ObjectTarget, Shape, Style, TextAlign,
+    AddedContent, AddedText, BlockStyle, Edit, FontFamily, ImageEdit, NewAnnotation, ObjectKind, ObjectTarget, RangeStyle, Shape, Style, TextAlign,
 };
 use serde_json::Value;
 
@@ -67,7 +69,11 @@ pub fn parse_targets(json: &str) -> Result<Vec<Target>, String> {
 
 /// How text looks, as far as the caller says; what it leaves out stays as it is. Parsed from
 /// `{"family": "helvetica"|"times"|"courier", "bold": true, "italic": false, "size": 14,
-/// "color": [r, g, b] (0 to 1), "align": "left"|"center"|"right"|"justify"}`.
+/// "color": [r, g, b] (0 to 1), "align": "left"|"center"|"right"|"justify", "font": "<face>",
+/// "resource": "<page font>", "ranges": [{"from": 0, "to": 5, "font", "resource", "size", "color"}]}`.
+/// `font` is a face given to [`Document::register_text_font`] by its PostScript name (`""` goes
+/// back to `family`); `resource` one of [`Document::text_fonts_json`]; ranges are UTF-16 offsets
+/// into the paragraph's new text.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextStyle {
     pub family: Option<FontFamily>,
@@ -76,6 +82,53 @@ pub struct TextStyle {
     pub size: Option<f64>,
     pub color: Option<[f64; 3]>,
     pub align: Option<TextAlign>,
+    pub font: Option<String>,
+    pub resource: Option<String>,
+    pub ranges: Vec<RangeSpec>,
+}
+
+/// Part of a paragraph styled on its own.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RangeSpec {
+    pub from: usize,
+    pub to: usize,
+    pub font: Option<String>,
+    pub resource: Option<String>,
+    pub size: Option<f64>,
+    pub color: Option<[f64; 3]>,
+}
+
+fn parse_size(v: &Value) -> Result<Option<f64>, String> {
+    match v.as_f64() {
+        Some(s) if s.is_finite() && (1.0..=400.0).contains(&s) => Ok(Some(s)),
+        Some(_) => Err("the size is 1 to 400 points".into()),
+        None => Ok(None),
+    }
+}
+
+fn parse_color(v: &Value) -> Result<Option<[f64; 3]>, String> {
+    match v.get("color").filter(|c| !c.is_null()) {
+        None => Ok(None),
+        Some(c) => {
+            let parts: Vec<f64> = c.as_array().ok_or("a color is [r, g, b]")?.iter().filter_map(Value::as_f64).collect();
+            match parts.as_slice() {
+                [r, g, b] if parts.iter().all(|x| (0.0..=1.0).contains(x)) => Ok(Some([*r, *g, *b])),
+                _ => Err("a color is [r, g, b], each from 0 to 1".into()),
+            }
+        }
+    }
+}
+
+/// The UTF-8 offset in `text` of UTF-16 offset `at` (its end past the last character).
+fn utf8_offset(text: &str, at: usize) -> usize {
+    let mut units = 0;
+    for (i, c) in text.char_indices() {
+        if units >= at {
+            return i;
+        }
+        units += c.len_utf16();
+    }
+    text.len()
 }
 
 impl TextStyle {
@@ -99,27 +152,54 @@ impl TextStyle {
             Some("justify") => Some(TextAlign::Justify),
             Some(other) => return Err(format!("unknown alignment {other:?}")),
         };
-        let size = match v["size"].as_f64() {
-            Some(s) if s.is_finite() && (1.0..=400.0).contains(&s) => Some(s),
-            Some(_) => return Err("the size is 1 to 400 points".into()),
-            None => None,
-        };
-        let color = match v.get("color").filter(|c| !c.is_null()) {
-            None => None,
-            Some(c) => {
-                let parts: Vec<f64> = c.as_array().ok_or("a color is [r, g, b]")?.iter().filter_map(Value::as_f64).collect();
-                match parts.as_slice() {
-                    [r, g, b] if parts.iter().all(|x| (0.0..=1.0).contains(x)) => Some([*r, *g, *b]),
-                    _ => return Err("a color is [r, g, b], each from 0 to 1".into()),
-                }
+        let size = parse_size(&v["size"])?;
+        let color = parse_color(&v)?;
+        let text = |key: &str, of: &Value| of[key].as_str().map(str::to_string);
+        let mut ranges = Vec::new();
+        for r in v["ranges"].as_array().into_iter().flatten() {
+            let at = |key: &str| r[key].as_u64().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| format!("a range has a {key}"));
+            let (from, to) = (at("from")?, at("to")?);
+            if from > to {
+                return Err("a range runs from its start to its end".into());
             }
-        };
-        Ok(Self { family, bold: v["bold"].as_bool(), italic: v["italic"].as_bool(), size, color, align })
+            ranges.push(RangeSpec {
+                from,
+                to,
+                font: text("font", r),
+                resource: text("resource", r),
+                size: parse_size(&r["size"])?,
+                color: parse_color(r)?,
+            });
+        }
+        Ok(Self {
+            family,
+            bold: v["bold"].as_bool(),
+            italic: v["italic"].as_bool(),
+            size,
+            color,
+            align,
+            font: text("font", &v),
+            resource: text("resource", &v),
+            ranges,
+        })
     }
 
-    fn apply_to(&self, mut t: AddedText) -> AddedText {
+    fn apply_to(&self, mut t: AddedText, faces: &HashMap<String, Arc<Vec<u8>>>) -> Result<AddedText, String> {
         if let Some(f) = self.family {
             t.family = f;
+            t.face = None;
+        }
+        match self.font.as_deref() {
+            None => {}
+            Some("") => t.face = None,
+            Some(name) => t.face = Some(face_of(faces, name)?),
+        }
+        // A face read back from the file (a subset once saved) gives way to the whole one registered.
+        if let Some(f) = &t.face
+            && let Some(bytes) = faces.get(&f.name)
+            && !Arc::ptr_eq(bytes, &f.bytes)
+        {
+            t.face = Some(Face { name: f.name.clone(), bytes: bytes.clone() });
         }
         if let Some(b) = self.bold {
             t.bold = b;
@@ -136,8 +216,12 @@ impl TextStyle {
         if let Some(a) = self.align {
             t.align = a;
         }
-        t
+        Ok(t)
     }
+}
+
+fn face_of(faces: &HashMap<String, Arc<Vec<u8>>>, name: &str) -> Result<Face, String> {
+    faces.get(name).map(|bytes| Face { name: name.to_string(), bytes: bytes.clone() }).ok_or_else(|| format!("the font {name:?} was not registered"))
 }
 
 /// A box that is a real rectangle and a finite one.
@@ -158,8 +242,9 @@ fn to_f64(r: [f32; 4]) -> [f64; 4] {
 }
 
 /// A text style as the JSON [`TextStyle::parse`] reads back.
-fn style_json(family: FontFamily, bold: bool, italic: bool, size: f64, color: [f64; 3], align: Option<TextAlign>) -> Value {
+fn style_json(family: FontFamily, bold: bool, italic: bool, size: f64, color: [f64; 3], align: Option<TextAlign>, font: Option<&str>) -> Value {
     serde_json::json!({
+        "font": font,
         "family": match family { FontFamily::Times => "times", FontFamily::Courier => "courier", _ => "helvetica" },
         "bold": bold,
         "italic": italic,
@@ -215,11 +300,21 @@ impl Document {
             .map(|o| {
                 let [a, b] = [info.user_to_view(o.rect[0] as f32, o.rect[1] as f32), info.user_to_view(o.rect[2] as f32, o.rect[3] as f32)];
                 let style = match o.target.kind {
-                    ObjectKind::Text => blocks
-                        .get(o.target.index)
-                        .map(|b| style_json(family_of(&b.base_font), b.bold, b.italic, b.size, b.color, self.align_of(page, b))),
+                    ObjectKind::Text => blocks.get(o.target.index).map(|b| {
+                        style_json(
+                            family_of(&b.base_font),
+                            b.bold,
+                            b.italic,
+                            b.size,
+                            b.color,
+                            self.align_of(page, b),
+                            Some(pdfcraft_engine::strip_subset_tag(&b.base_font)),
+                        )
+                    }),
                     ObjectKind::Added => match self.added_content(page, o.target.index) {
-                        Ok(AddedContent::Text(t)) => Some(style_json(t.family, t.bold, t.italic, t.size, t.color, Some(t.align))),
+                        Ok(AddedContent::Text(t)) => {
+                            Some(style_json(t.family, t.bold, t.italic, t.size, t.color, Some(t.align), t.face.as_ref().map(|f| f.name.as_str())))
+                        }
                         _ => None,
                     },
                     ObjectKind::Image => None,
@@ -363,7 +458,7 @@ impl Document {
     /// Adds a text box over `view` (the width wraps the text; the height follows it).
     pub fn add_text(&mut self, page: usize, view: [f64; 4], text: &str, style: &TextStyle) -> Result<(), String> {
         let rect = self.to_display_space(page, checked(view)?)?;
-        let added = style.apply_to(AddedText { rect, text: text.to_string(), ..AddedText::default() });
+        let added = style.apply_to(AddedText { rect, text: text.to_string(), ..AddedText::default() }, &self.faces)?;
         self.apply(Edit::AddText { page, text: added })
     }
 
@@ -391,7 +486,8 @@ impl Document {
                     if let Some(words) = text {
                         t.text = words.to_string();
                     }
-                    self.apply(Edit::UpdateContent { page, index: target.index, content: AddedContent::Text(style.apply_to(t)) })
+                    let t = style.apply_to(t, &self.faces)?;
+                    self.apply(Edit::UpdateContent { page, index: target.index, content: AddedContent::Text(t) })
                 }
                 AddedContent::Image(_) => Err("that is a picture, not text".into()),
             },
@@ -401,7 +497,8 @@ impl Document {
                 // a restyled block into lines; its words joined, and changed by a trailing space, lay the block out again.
                 let words = text.map_or_else(|| reflowed(&block), str::to_string);
                 // A family, bold and italic go together in the engine's style; fill what is not said from the paragraph.
-                let wants_face = style.family.is_some() || style.bold.is_some() || style.italic.is_some();
+                let chosen = style.font.as_deref().filter(|f| !f.is_empty());
+                let wants_face = chosen.is_none() && (style.family.is_some() || style.bold.is_some() || style.italic.is_some());
                 let family = wants_face.then(|| {
                     (
                         style.family.unwrap_or_else(|| family_of(&block.base_font)),
@@ -409,18 +506,73 @@ impl Document {
                         style.italic.unwrap_or(block.italic),
                     )
                 });
+                // One chosen face per change, for the paragraph or for its ranges.
+                let mut font = chosen.map(str::to_string);
+                let mut ranges = Vec::new();
+                for r in &style.ranges {
+                    let range = utf8_offset(&words, r.from)..utf8_offset(&words, r.to);
+                    if let Some(f) = r.font.as_deref() {
+                        if font.as_deref().is_some_and(|g| g != f) {
+                            return Err("one font at a time".into());
+                        }
+                        font = Some(f.to_string());
+                    }
+                    let resource = if r.font.is_some() { Some(pdfcraft_edit::text::CHOSEN_FONT.to_string()) } else { r.resource.clone() };
+                    ranges.push(RangeStyle {
+                        range,
+                        family: None,
+                        resource,
+                        size: r.size,
+                        color: r.color,
+                        underline: None,
+                        char_spacing: None,
+                        scale: None,
+                    });
+                }
+                let bytes = font.as_deref().map(|f| face_of(&self.faces, f).map(|f| f.bytes)).transpose()?;
+                let resource = if chosen.is_some() { Some(pdfcraft_edit::text::CHOSEN_FONT.to_string()) } else { style.resource.clone() };
                 let edit = BlockStyle {
                     family,
                     size: style.size,
                     color: style.color,
                     align: style.align,
                     width: Some(self.ink_width(page, &block)),
+                    font: bytes,
+                    resource,
+                    ranges,
                     ..BlockStyle::default()
                 };
                 self.apply(Edit::EditTextBlock { page, block: target.index, text: words, style: edit })
             }
             Kind::Image => Err("a picture has no text".into()),
         }
+    }
+
+    /// Keeps a face for text (a .ttf or .otf the person chose): checked as embedding checks it
+    /// (a static outline font whose fsType allows editable embedding), then named in styles by
+    /// the PostScript name returned as `{"font", "family"}`. Nothing is written until it is used,
+    /// and only the glyphs used are saved, unless the font forbids subsetting.
+    pub fn register_text_font(&mut self, bytes: &[u8]) -> Result<String, String> {
+        pdfcraft_fonts::embedding::validate(bytes)?;
+        let (family, name) = pdfcraft_fonts::embedding::names(bytes)?;
+        let same = self.faces.get(&name).is_some_and(|b| b.as_slice() == bytes);
+        if !same {
+            self.faces.insert(name.clone(), Arc::new(bytes.to_vec()));
+        }
+        serde_json::to_string(&serde_json::json!({ "font": name, "family": family })).map_err(|e| e.to_string())
+    }
+
+    /// The fonts a page's text can be set in: `{"resource", "face", "choice"}` for each of its own
+    /// embedded fonts (and approved full faces of them), `choice` for a replacement only offered.
+    pub fn text_fonts_json(&self, page: usize) -> Result<String, String> {
+        self.page_info(page)?;
+        let list: Vec<Value> = self
+            .doc()?
+            .text_editor_fonts(page)
+            .iter()
+            .map(|f| serde_json::json!({ "resource": f.resource, "face": f.face, "choice": f.choice_only }))
+            .collect();
+        serde_json::to_string(&list).map_err(|e| e.to_string())
     }
 
     /// Paints a white box over `view`, covering what is under it (a page mark, not an erasure: the
@@ -638,6 +790,130 @@ mod tests {
         assert!(before.rgba.chunks(4).any(|p| p[..3] != [255, 255, 255]), "the text showed");
         assert!(after.rgba.chunks(4).all(|p| p[..3] == [255, 255, 255]), "now all white");
         assert!(doc.cover(0, [5.0, 5.0, 5.0, 9.0]).is_err());
+    }
+
+    const INTER: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
+
+    /// The Type 0 fonts of a saved file's first page: base name, program bytes and whether the program was subset.
+    fn saved_fonts(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let doc = pdfcraft_cos::Document::open(Arc::new(bytes.to_vec())).expect("reopens");
+        let page = pdfcraft_model::pages(&doc).remove(0);
+        let resources = doc.dict(page.dict.get(b"Resources").expect("resources")).expect("dict");
+        let fonts = doc.dict(resources.get(b"Font").expect("fonts")).expect("dict");
+        fonts
+            .iter()
+            .filter_map(|(_, f)| {
+                let f = doc.dict(f)?;
+                (f.name(b"Subtype") == Some(b"Type0")).then(|| {
+                    (
+                        String::from_utf8_lossy(f.name(b"BaseFont").unwrap_or_default()).into_owned(),
+                        pdfcraft_fonts::pdf::embedded_sfnt(&doc, &f).unwrap_or_default(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn font_style(font: &str) -> TextStyle {
+        TextStyle { font: Some(font.into()), ..TextStyle::default() }
+    }
+
+    #[test]
+    fn added_text_in_a_registered_font_is_embedded_as_a_subset_and_reads_back() {
+        let mut doc = open();
+        let info: Value = serde_json::from_str(&doc.register_text_font(INTER).expect("registers")).expect("json");
+        let name = info["font"].as_str().expect("name").to_string();
+        assert!(doc.register_text_font(b"not a font").is_err());
+        doc.add_text(0, [20.0, 40.0, 180.0, 80.0], "Grüße Ωmega", &font_style(&name)).expect("adds");
+        let added: Vec<Value> = objects(&doc).into_iter().filter(|o| o["kind"] == "added").collect();
+        assert_eq!(added[0]["style"]["font"], name.as_str());
+        let saved = doc.save().expect("saves");
+        let fonts = saved_fonts(&saved);
+        let (base, program) = fonts.iter().find(|(b, _)| b.ends_with(&name)).expect("the face is embedded");
+        assert!(base.len() == name.len() + 7 && base.as_bytes()[6] == b'+', "a subset tag: {base}");
+        assert!(program.len() * 4 < INTER.len(), "subset: {} of {} bytes", program.len(), INTER.len());
+        assert!(saved.len() < fixture().len() + INTER.len() / 4, "the file grows by the subset only");
+        // Copy and search read the text back through its ToUnicode map.
+        let reopened = Document::open(&saved, None, || 0).expect("reopens");
+        let back: Vec<Value> = objects(&reopened).into_iter().filter(|o| o["kind"] == "added").collect();
+        assert_eq!(back[0]["text"], "Grüße Ωmega");
+        assert_eq!(back[0]["style"]["font"], name.as_str(), "the item keeps its face");
+        let found = |d: &Document| serde_json::from_str::<Vec<Value>>(&d.text_blocks_json(0).expect("blocks")).expect("json");
+        assert!(found(&reopened).iter().any(|b| b["text"].as_str().is_some_and(|t| t.contains("Grüße"))), "the page text has it");
+        // The open document keeps the whole face: new letters later are subset again on the next save.
+        let target = Target { kind: Kind::Added, index: 0 };
+        doc.set_text(0, target, Some("Zebra quiz"), &TextStyle::default()).expect("retypes");
+        let again = saved_fonts(&doc.save().expect("saves"));
+        let (_, program) = again.iter().find(|(b, _)| b.ends_with(&name)).expect("still embedded");
+        assert!(pdfcraft_fonts::embedding::covers(program, "Zebra quiz"), "the new letters are in the new subset");
+        assert!(!pdfcraft_fonts::embedding::covers(program, "Ω"), "and the old ones are gone");
+        // Back to a standard family, and undo brings the face back.
+        doc.set_text(0, target, None, &TextStyle { family: Some(FontFamily::Times), ..TextStyle::default() }).expect("restyles");
+        assert_eq!(objects(&doc).into_iter().find(|o| o["kind"] == "added").expect("added")["style"]["font"], Value::Null);
+        doc.undo().expect("undoes");
+        assert_eq!(objects(&doc).into_iter().find(|o| o["kind"] == "added").expect("added")["style"]["font"], name.as_str());
+        assert!(doc.add_text(0, [20.0, 40.0, 180.0, 80.0], "x", &font_style("Nope")).is_err(), "an unknown face");
+    }
+
+    #[test]
+    fn a_paragraph_and_a_range_take_a_registered_font() {
+        let mut doc = open();
+        let name = serde_json::from_str::<Value>(&doc.register_text_font(INTER).expect("registers")).expect("json")["font"]
+            .as_str()
+            .expect("name")
+            .to_string();
+        let text = Target { kind: Kind::Text, index: 0 };
+        doc.set_text(0, text, None, &font_style(&name)).expect("sets the font");
+        let blocks: Vec<Value> = serde_json::from_str(&doc.text_blocks_json(0).expect("blocks")).expect("json");
+        assert!(blocks[0]["font"].as_str().expect("font").contains("Inter"), "{}", blocks[0]["font"]);
+        // The page font maps the whole face; the saved one maps only what is shown.
+        let saved = doc.save().expect("saves");
+        assert!(saved.len() < fixture().len() + INTER.len() / 10, "{} bytes", saved.len() - fixture().len());
+        let back = Document::open(&saved, None, || 0).expect("reopens");
+        let again: Vec<Value> = serde_json::from_str(&back.text_blocks_json(0).expect("blocks")).expect("json");
+        assert_eq!(again[0]["text"], blocks[0]["text"]);
+        assert!(
+            serde_json::from_str::<Vec<Value>>(&doc.text_fonts_json(0).expect("fonts"))
+                .expect("json")
+                .iter()
+                .any(|f| f["face"].as_str().is_some_and(|f| f.contains("Inter")))
+        );
+        doc.undo().expect("undoes");
+        // Only "there" in the face.
+        let ranged =
+            TextStyle { ranges: vec![RangeSpec { from: 6, to: 11, font: Some(name.clone()), ..RangeSpec::default() }], ..TextStyle::default() };
+        doc.set_text(0, text, Some("Hello there"), &ranged).expect("sets a range");
+        let saved = doc.save().expect("saves");
+        let fonts = saved_fonts(&saved);
+        let (_, program) = fonts.iter().find(|(b, _)| b.contains("Inter")).expect("embedded");
+        assert!(program.len() * 4 < INTER.len(), "subset: {} bytes", program.len());
+        assert!(pdfcraft_fonts::embedding::covers(program, "ther"));
+        let reopened = Document::open(&saved, None, || 0).expect("reopens");
+        let blocks: Vec<Value> = serde_json::from_str(&reopened.text_blocks_json(0).expect("blocks")).expect("json");
+        assert_eq!(blocks[0]["text"].as_str().expect("text").replace('\n', " ").trim_end(), "Hello there");
+    }
+
+    #[test]
+    fn a_face_that_forbids_subsetting_is_saved_whole_and_restricted_ones_are_refused() {
+        let with_fs_type = |fs: u16| {
+            let mut font = INTER.to_vec();
+            let count = u16::from_be_bytes([font[4], font[5]]) as usize;
+            let rec = (0..count).map(|i| 12 + i * 16).find(|r| &font[*r..*r + 4] == b"OS/2").expect("OS/2");
+            let at = u32::from_be_bytes([font[rec + 8], font[rec + 9], font[rec + 10], font[rec + 11]]) as usize + 8;
+            font[at..at + 2].copy_from_slice(&fs.to_be_bytes());
+            font
+        };
+        let mut doc = open();
+        assert!(doc.register_text_font(&with_fs_type(0x0002)).is_err(), "restricted");
+        assert!(doc.register_text_font(&with_fs_type(0x0004)).is_err(), "preview and print");
+        let whole = with_fs_type(0x0100);
+        let name = serde_json::from_str::<Value>(&doc.register_text_font(&whole).expect("registers")).expect("json")["font"]
+            .as_str()
+            .expect("name")
+            .to_string();
+        doc.add_text(0, [20.0, 40.0, 180.0, 80.0], "Whole", &font_style(&name)).expect("adds");
+        let fonts = saved_fonts(&doc.save().expect("saves"));
+        assert!(fonts.iter().any(|(_, p)| p == &whole), "embedded whole");
     }
 
     #[test]
