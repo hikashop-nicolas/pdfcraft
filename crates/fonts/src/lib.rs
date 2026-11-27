@@ -18,10 +18,12 @@ mod script;
 pub mod shaped_text;
 mod shaping;
 pub mod source_shaping;
+pub mod subset;
 pub use craft::{
-    CRAFT_FONTS, EmbeddedFace, SHIPPORI_MINCHO, add_craft_font, craft_fonts, document_arabic_font, document_devanagari_font, document_hebrew_font, document_japanese_font,
-    document_japanese_font_for_style, document_japanese_fonts_for_style, document_korean_font, document_latin_fonts, document_thai_font, ui_arabic_fonts, ui_chinese_fonts,
-    ui_cjk_fonts, ui_devanagari_fonts, ui_hebrew_fonts, ui_japanese_fonts, ui_telugu_fonts, ui_thai_fonts,
+    CRAFT_FONTS, EmbeddedFace, SHIPPORI_MINCHO, add_craft_font, craft_fonts, document_arabic_font, document_devanagari_font, document_hebrew_font,
+    document_japanese_font, document_japanese_font_for_style, document_japanese_fonts_for_style, document_korean_font, document_latin_fonts,
+    document_thai_font, ui_arabic_fonts, ui_chinese_fonts, ui_cjk_fonts, ui_devanagari_fonts, ui_hebrew_fonts, ui_japanese_fonts, ui_telugu_fonts,
+    ui_thai_fonts,
 };
 pub use craft_pdf::fonts::{
     Std14, Std14Match, UnicodeCMap, encodings, first_non_win_ansi, fits_win_ansi, win_ansi, win_ansi_byte, win_ansi_char, win_ansi_encodable,
@@ -32,8 +34,8 @@ pub use script::{
     script_missing, script_outline,
 };
 pub use shaping::{
-    ShapedCluster, ShapedScript, arabic_glyph, arabic_has, cjk_has, face_glyph, hang_has, hans_has, hebrew_has, latin_has, shape_arabic, shape_cjk, shape_hang, shape_hans, shape_hebrew, shape_latin, shape_thai,
-    shaped_glyph, thai_has,
+    ShapedCluster, ShapedScript, arabic_glyph, arabic_has, cjk_has, face_glyph, hang_has, hans_has, hebrew_has, latin_has, shape_arabic, shape_cjk,
+    shape_hang, shape_hans, shape_hebrew, shape_latin, shape_thai, shaped_glyph, thai_has,
 };
 
 /// Advance of `s` in Helvetica at `size` points, using the exact standard-14 metrics.
