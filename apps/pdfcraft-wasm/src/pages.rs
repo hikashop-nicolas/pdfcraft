@@ -119,7 +119,7 @@ impl Document {
 
     // ------------------------------------------------------------------ marks on every page
 
-    /// A watermark: `{"text", "size"?, "color"?, "opacity"?, "rotation"?, "behind"?, "scale"?, "pages"?}`, or a picture from `picture`.
+    /// A watermark: `{"text", "size"?, "color"?, "opacity"?, "rotation"?, "behind"?, "scale"?, "font"?, "pages"?}`, or a picture from `picture`.
     /// It replaces the document's earlier watermark.
     pub fn add_watermark(&mut self, spec: &str, picture: Option<(String, Vec<u8>)>) -> Result<(), String> {
         let v: Value = serde_json::from_str(spec).map_err(|e| e.to_string())?;
@@ -134,6 +134,7 @@ impl Document {
             rotation: number(&v, "rotation", 45.0, -360.0..=360.0)?,
             behind: v["behind"].as_bool().unwrap_or(false),
             offset: [0.0, 0.0],
+            face: self.mark_font(&v)?.1,
         };
         if picture.is_none() && settings.text.trim().is_empty() {
             return Err("a watermark needs some text or a picture".into());
@@ -164,6 +165,7 @@ impl Document {
         settings.color = colour(&v, "color", [0.0; 3])?;
         settings.start_number = number(&v, "start", 1.0, 0.0..=100_000.0)? as u32;
         settings.shrink = v["shrink"].as_bool().unwrap_or(false);
+        (settings.font, settings.face) = self.mark_font(&v)?;
         if let Some(m) = v["margins"].as_array().filter(|m| m.len() == 4) {
             for (slot, n) in settings.margins.iter_mut().zip(m) {
                 *slot = n.as_f64().filter(|n| (0.0..=400.0).contains(n)).ok_or("margins are from 0 to 400 points")?;
@@ -173,6 +175,20 @@ impl Document {
             return Err(format!("the font cannot draw {c:?}"));
         }
         self.apply(Edit::AddHeaderFooter { pages, settings, replace: true })
+    }
+
+    /// A mark's `"font"`: `helvetica`, `times`, `courier`, or a face given to `register_text_font`.
+    fn mark_font(&self, v: &Value) -> Result<(pdfcraft_engine::FontFamily, Option<pdfcraft_edit::Face>), String> {
+        use pdfcraft_engine::FontFamily;
+        Ok(match v["font"].as_str() {
+            None | Some("" | "helvetica") => (FontFamily::Helvetica, None),
+            Some("times") => (FontFamily::Times, None),
+            Some("courier") => (FontFamily::Courier, None),
+            Some(name) => {
+                let bytes = self.faces.get(name).cloned().ok_or_else(|| format!("the font {name:?} was not registered"))?;
+                (FontFamily::Helvetica, Some(pdfcraft_edit::Face { name: name.to_string(), bytes }))
+            }
+        })
     }
 
     /// A background behind the content: `{"color"?, "opacity"?, "scale"?, "pages"?}`, or a picture from `picture`.

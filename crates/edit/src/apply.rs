@@ -123,9 +123,10 @@ fn add_header_footer_in_place(doc: &mut Document, pages: &[usize], hf: &HeaderFo
             let line_h = size * 1.2;
             for (li, line) in lines.iter().enumerate() {
                 // Centred and right-aligned text is placed by its width in the chosen face.
-                let drawn_apart = added::needs_fallback_face(line);
+                // A chosen face's lines go the same way, with the face embedded.
+                let drawn_apart = hf.face.is_some() || added::needs_fallback_face(line);
                 let face = |s: &str, size: f64| hf.font.width(s, size, false, false);
-                let tw = if drawn_apart { added::mark_line_width(line, size) } else { thai_width(line, size, face) };
+                let tw = if drawn_apart { added::mark_line_width(line, size, hf.face.as_ref()) } else { thai_width(line, size, face) };
                 let x = match slot % 3 {
                     0 => left,
                     1 => (w - tw) / 2.0,
@@ -138,7 +139,7 @@ fn add_header_footer_in_place(doc: &mut Document, pages: &[usize], hf: &HeaderFo
                     for (name, font) in fallback_fonts.iter() {
                         seen.set(name.clone(), font.clone());
                     }
-                    let (ops, fonts) = added::mark_line(doc, line, size, hf.color, x, y, &seen)?;
+                    let (ops, fonts) = added::mark_line(doc, line, size, hf.color, [x, y], &seen, hf.face.as_ref())?;
                     fallback.extend(format!("{}\n", rgb(hf.color)).bytes());
                     fallback.extend(ops);
                     for (name, font) in fonts.iter() {
@@ -231,7 +232,13 @@ fn add_watermark_in_place(doc: &mut Document, pages: &[usize], wm: &Watermark, r
         }
         let widest = lines
             .iter()
-            .map(|l| if added::needs_fallback_face(l) { added::mark_line_width(l, 1.0) } else { thai_width(l, 1.0, helvetica_width) })
+            .map(|l| {
+                if wm.face.is_some() || added::needs_fallback_face(l) {
+                    added::mark_line_width(l, 1.0, wm.face.as_ref())
+                } else {
+                    thai_width(l, 1.0, helvetica_width)
+                }
+            })
             .fold(0.0, f64::max)
             .max(0.01);
         let size = if wm.font_size > 0.0 { wm.font_size } else { ((w * w + h * h).sqrt() * 0.5 / widest).clamp(6.0, 300.0) };
@@ -261,13 +268,13 @@ fn add_watermark_in_place(doc: &mut Document, pages: &[usize], wm: &Watermark, r
         let mut current = None;
         for (li, line) in lines.iter().enumerate() {
             let y = total / 2.0 - li as f64 * line_h - size * 0.35;
-            if added::needs_fallback_face(line) {
-                let tw = added::mark_line_width(line, size);
+            if wm.face.is_some() || added::needs_fallback_face(line) {
+                let tw = added::mark_line_width(line, size, wm.face.as_ref());
                 let mut seen = taken.clone();
                 for (name, font) in fallback_fonts.iter() {
                     seen.set(name.clone(), font.clone());
                 }
-                let (ops, fonts) = added::mark_line(doc, line, size, wm.color, -tw / 2.0, y, &seen)?;
+                let (ops, fonts) = added::mark_line(doc, line, size, wm.color, [-tw / 2.0, y], &seen, wm.face.as_ref())?;
                 fallback.extend(format!("{}\n", rgb(wm.color)).bytes());
                 fallback.extend(ops);
                 for (name, font) in fonts.iter() {

@@ -893,6 +893,54 @@ mod tests {
         assert_eq!(blocks[0]["text"].as_str().expect("text").replace('\n', " ").trim_end(), "Hello there");
     }
 
+    /// Every Type 0 font of a saved file: base name and program.
+    fn all_fonts(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let doc = pdfcraft_cos::Document::open(Arc::new(bytes.to_vec())).expect("reopens");
+        doc.scan_objects()
+            .filter_map(|(_, o)| {
+                let f = o.as_dict()?.clone();
+                (f.name(b"Subtype") == Some(b"Type0")).then(|| {
+                    (
+                        String::from_utf8_lossy(f.name(b"BaseFont").unwrap_or_default()).into_owned(),
+                        pdfcraft_fonts::embedding::embedded_program(&doc, &f),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn register(doc: &mut Document) -> String {
+        serde_json::from_str::<Value>(&doc.register_text_font(INTER).expect("registers")).expect("json")["font"].as_str().expect("name").to_string()
+    }
+
+    #[test]
+    fn headers_footers_and_watermarks_take_a_registered_font() {
+        let mut doc = open();
+        let name = register(&mut doc);
+        let spec = serde_json::json!({ "text": ["Grüße <<1>>", "", "", "", "", "Ωmega"], "size": 10, "font": name });
+        doc.add_header_footer(&spec.to_string()).expect("adds a header and footer");
+        doc.add_watermark(&serde_json::json!({ "text": "Entwurf ő", "font": name }).to_string(), None).expect("adds a watermark");
+        assert!(doc.add_watermark(&serde_json::json!({ "text": "x", "font": "Nope" }).to_string(), None).is_err());
+        let saved = doc.save().expect("saves");
+        let fonts = all_fonts(&saved);
+        let inter: Vec<_> = fonts.iter().filter(|(b, _)| b.ends_with(&name)).collect();
+        assert!(!inter.is_empty(), "the face is embedded: {fonts:?}");
+        for (base, program) in &inter {
+            assert!(base.as_bytes().get(6) == Some(&b'+'), "a subset: {base}");
+            assert!(program.len() * 4 < INTER.len(), "subset: {} bytes", program.len());
+            assert!(pdfcraft_fonts::embedding::covers(program, "Grüße1ΩmegaEntwurfő"));
+        }
+        let back = Document::open(&saved, None, || 0).expect("reopens");
+        let text: String = serde_json::from_str::<Vec<Value>>(&back.text_blocks_json(0).expect("blocks"))
+            .expect("json")
+            .iter()
+            .filter_map(|b| b["text"].as_str().map(str::to_string))
+            .collect();
+        for words in ["Grüße 1", "Ωmega", "Entwurf ő"] {
+            assert!(text.contains(words), "{words} in {text:?}");
+        }
+    }
+
     #[test]
     fn a_face_that_forbids_subsetting_is_saved_whole_and_restricted_ones_are_refused() {
         let with_fs_type = |fs: u16| {

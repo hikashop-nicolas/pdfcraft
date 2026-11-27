@@ -308,14 +308,14 @@ pub(crate) fn needs_fallback_face(text: &str) -> bool {
 }
 
 /// The first character of `text` that neither the standard fonts nor the fallback faces can draw.
-pub(crate) fn first_unmarkable(text: &str) -> Option<char> {
-    let rest: String = text.chars().filter(|c| fallback_script(*c).is_none()).collect();
+pub(crate) fn first_unmarkable(text: &str, face: Option<&super::Face>) -> Option<char> {
+    let rest: String = text.chars().filter(|c| fallback_script(*c).is_none() && !face.is_some_and(|f| f.has(*c))).collect();
     pdfcraft_fonts::shaped_text::first_undrawable_in_line(&rest)
 }
 
 /// The width of one line at `size`, the fallback faces' glyphs included.
-pub(crate) fn mark_line_width(text: &str, size: f64) -> f64 {
-    let t = AddedText { text: text.to_string(), size, ..AddedText::default() };
+pub(crate) fn mark_line_width(text: &str, size: f64, face: Option<&super::Face>) -> f64 {
+    let t = AddedText { text: text.to_string(), size, face: face.cloned(), ..AddedText::default() };
     shaped_layout(&t, text, false).map(|(_, w)| w).unwrap_or_else(|_| latin_width(&t, text))
 }
 

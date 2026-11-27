@@ -47,6 +47,23 @@ pub fn glyphs(bytes: &[u8], text: &str) -> Vec<Option<(u16, f64)>> {
         .collect()
 }
 
+/// The font program a Type 0 font embeds, as stored (empty without one).
+pub fn embedded_program(doc: &Document, font: &Dict) -> Vec<u8> {
+    let Some(cid) = font.get(b"DescendantFonts").and_then(|d| doc.resolve(d).as_array().and_then(|a| a.first().cloned())).and_then(|d| doc.dict(&d))
+    else {
+        return Vec::new();
+    };
+    let Some(descriptor) = cid.get(b"FontDescriptor").and_then(|d| doc.dict(d)) else { return Vec::new() };
+    descriptor
+        .get(b"FontFile2")
+        .or_else(|| descriptor.get(b"FontFile3"))
+        .and_then(|p| match doc.resolve(p).as_ref() {
+            Object::Stream(s) => s.decoded_within(32 << 20).ok(),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// Names come from the program, never a caller's guessed family.
 pub fn names(bytes: &[u8]) -> Result<(String, String), String> {
     use skrifa::string::StringId;

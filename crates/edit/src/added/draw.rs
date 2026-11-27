@@ -50,19 +50,20 @@ fn draw_shaped(doc: &mut Document, t: &AddedText, taken: &Dict, fonts: &mut Dict
 }
 
 /// Content operators for one line of a page mark, its left edge at `x` and its baseline at `y` (display
-/// space), with the fonts they use (Type 3 glyph fonts and the Helvetica the line's Latin runs take)
-/// for the page's resources. `taken` holds the fonts the page already draws with.
+/// space, `at`), with the fonts they use (Type 3 glyph fonts, the Helvetica the line's Latin runs take,
+/// and the chosen `face`) for the page's resources. `taken` holds the fonts the page already draws with.
 pub(crate) fn mark_line(
     doc: &mut Document,
     text: &str,
     size: f64,
     color: [f64; 3],
-    x: f64,
-    y: f64,
+    [x, y]: [f64; 2],
     taken: &Dict,
+    face: Option<&super::Face>,
 ) -> Result<(Vec<u8>, Dict), EditError> {
     let top = y + 0.95 * size;
-    let t = AddedText { rect: [x, top - size * 1.2, x + 1.0e6, top], text: text.to_string(), size, color, ..AddedText::default() };
+    let t =
+        AddedText { rect: [x, top - size * 1.2, x + 1.0e6, top], text: text.to_string(), size, color, face: face.cloned(), ..AddedText::default() };
     let base = t.family.base_font(false, false);
     let mut font = Dict::new();
     font.set(b"Type".to_vec(), Object::name("Font"));

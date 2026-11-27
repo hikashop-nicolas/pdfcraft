@@ -105,6 +105,8 @@ pub struct HeaderFooter {
     pub text: [String; 6],
     /// The standard face the text is drawn in (#3754): Helvetica (the default), Times or Courier.
     pub font: added::Family,
+    /// A face the person chose, drawn in place of `font` for what it has, embedded.
+    pub face: Option<added::Face>,
     pub font_size: f64,
     pub color: Rgb,
     pub underline: bool,
@@ -124,6 +126,7 @@ impl Default for HeaderFooter {
         Self {
             text: Default::default(),
             font: added::Family::Helvetica,
+            face: None,
             font_size: 8.0,
             color: [0.0; 3],
             underline: false,
@@ -141,7 +144,7 @@ impl HeaderFooter {
     /// `expand`'s output is, covers every page (and a `\r` that would be drawn is refused too).
     /// The dialog asks this too, so its preview never offers text that applying refuses (#2013).
     pub fn first_undrawable(&self) -> Option<char> {
-        self.text.iter().flat_map(|t| t.lines()).find_map(added::first_unmarkable)
+        self.text.iter().flat_map(|t| t.lines()).find_map(|l| added::first_unmarkable(l, self.face.as_ref()))
     }
 
     /// The room the header and the footer take at the top and the bottom of a page, in points:
@@ -201,6 +204,8 @@ pub struct Watermark {
     pub scale: f64,
     /// 0 = fit: about half the page diagonal.
     pub font_size: f64,
+    /// A face the person chose for the text, embedded; Helvetica otherwise.
+    pub face: Option<added::Face>,
     pub color: Rgb,
     /// 0–1.
     pub opacity: f64,
@@ -219,7 +224,7 @@ impl Watermark {
     pub fn first_undrawable(&self) -> Option<char> {
         match self.source {
             Some(_) => None,
-            None => self.text.trim().lines().find_map(added::first_unmarkable),
+            None => self.text.trim().lines().find_map(|l| added::first_unmarkable(l, self.face.as_ref())),
         }
     }
 }
@@ -231,6 +236,7 @@ impl Default for Watermark {
             source: None,
             scale: 0.5,
             font_size: 0.0,
+            face: None,
             color: [0.6, 0.6, 0.6],
             opacity: 0.5,
             rotation: 45.0,
