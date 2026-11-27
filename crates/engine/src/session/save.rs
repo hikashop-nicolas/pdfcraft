@@ -25,12 +25,15 @@ impl Session {
         // a reconstructed file) still writes the current graph on its own.
         let rewrite = editor.cos.full_save_required() || editor.cos.encryption_changed() || editor.cos.revisions().is_empty();
         let cos = writable(&editor.cos)?;
+        // Fonts embedded whole for editing are written as subsets.
+        let subset = guard(|| pdfcraft_edit::font_subset::subset_for_save(&cos)).ok().flatten();
+        let cos: &pdfcraft_cos::Document = subset.as_ref().unwrap_or(&cos);
         guard(|| {
             if on_saved || rewrite {
-                write_incremental(&cos, &opts)
+                write_incremental(cos, &opts)
             } else {
                 let mut base = pdfcraft_cos::Document::open_with_password(editor.saved.clone(), editor.saved_keys.reopen.as_deref())?;
-                base.overlay_changes_from(&cos)?;
+                base.overlay_changes_from(cos)?;
                 write_incremental(&base, &opts)
             }
         })
@@ -48,7 +51,9 @@ impl Session {
         let editor = doc.editor.as_ref().ok_or_else(|| EditError::ReadOnly(doc.read_only_reason.clone().unwrap_or_default()))?;
         let opts = SaveOptions { mod_date: self.now().map(pdfcraft_cos::pdf_date), ..SaveOptions::default() };
         let cos = writable(&editor.cos)?;
-        guard(|| write_full(&cos, &opts)).map_err(EditError::Write)?.map(Arc::new).map_err(|e| EditError::Write(e.to_string()))
+        let subset = guard(|| pdfcraft_edit::font_subset::subset_for_save(&cos)).ok().flatten();
+        let cos: &pdfcraft_cos::Document = subset.as_ref().unwrap_or(&cos);
+        guard(|| write_full(cos, &opts)).map_err(EditError::Write)?.map(Arc::new).map_err(|e| EditError::Write(e.to_string()))
     }
 
     /// Check that `bytes`, from [`Self::save_bytes`] or [`Self::save_full_bytes`], reopen as this

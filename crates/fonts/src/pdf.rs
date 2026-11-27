@@ -1116,6 +1116,11 @@ impl Metrics {
         out
     }
 
+    /// The codes a composite font's string shows, each with its byte length and CID.
+    pub fn code_cids(&self, s: &[u8]) -> Vec<(u32, usize, u32)> {
+        self.codes(s).into_iter().map(|(code, len)| (code, len, self.cid(code))).collect()
+    }
+
     pub(crate) fn cid(&self, code: u32) -> u32 {
         if self.cid_map.is_empty() {
             return code;

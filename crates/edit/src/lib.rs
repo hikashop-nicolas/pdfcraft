@@ -69,6 +69,7 @@ pub mod printer_marks;
 pub use printer_marks::{PrinterMarks, add_printer_marks};
 mod colour;
 pub mod convert_colours;
+pub mod font_subset;
 pub mod hairlines;
 mod page_streams;
 pub use convert_colours::{ColourTarget, ConvertColours, Converted as ColoursConverted, ImageRecolour, convert_colours};
