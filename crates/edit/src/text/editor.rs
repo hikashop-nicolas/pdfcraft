@@ -86,6 +86,12 @@ pub fn text_editor_fonts(doc: &Document, page: usize) -> Result<Vec<TextEditorFo
 /// the new resource can complete matching source subsets or be chosen in a text style.
 pub fn register_text_font(doc: &mut Document, page: usize, bytes: &[u8]) -> Result<String, EditError> {
     pdfcraft_fonts::embedding::validate_document_input(bytes).map_err(EditError::Invalid)?;
+    register_user_text_font(doc, page, bytes)
+}
+
+/// [`register_text_font`] for a face the person picked themselves: its embedding permissions,
+/// outlines and size are checked, not a licence declared in its name table.
+pub fn register_user_text_font(doc: &mut Document, page: usize, bytes: &[u8]) -> Result<String, EditError> {
     let (_, postscript) = pdfcraft_fonts::embedding::names(bytes).map_err(EditError::Invalid)?;
     let p = page_dict(doc, page)?;
     let mut resources = p.dict.get(b"Resources").and_then(|o| doc.dict(o)).unwrap_or_default();

@@ -40,11 +40,11 @@ mod rewrite;
 #[cfg(test)]
 use blocks::wrap;
 pub use blocks::{
-    BlockKey, BlockStyle, RangeStyle, ReadingBlocks, RunSources, TextBlock, block_overlapping, clear_block, reading_blocks, reading_blocks_checked,
-    replace_block, text_blocks,
+    BlockKey, BlockStyle, CHOSEN_FONT, RangeStyle, ReadingBlocks, RunSources, TextBlock, block_overlapping, clear_block, reading_blocks,
+    reading_blocks_checked, replace_block, text_blocks,
 };
 use blocks::{kept_words, paragraph_separator, row_break};
-pub use editor::{TextEditLayout, TextEditorFont, register_text_font, text_edit_layout, text_editor_fonts};
+pub use editor::{TextEditLayout, TextEditorFont, register_text_font, register_user_text_font, text_edit_layout, text_editor_fonts};
 use editor::{builtin_thai_choice, layout_draft};
 use fallback::{
     MAX_TYPE3_GLYPHS, Type3Glyph, fallback_face, needs_type3, no_fallback_font, no_glyph_for, same_base_font, same_font, source_encodes,

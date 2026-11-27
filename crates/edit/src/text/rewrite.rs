@@ -1051,6 +1051,8 @@ pub(crate) fn rewrite_block_from(
     style: &BlockStyle,
     max_glyphs: usize,
 ) -> Result<LineEdit, EditError> {
+    let chosen = super::blocks::with_chosen_font(doc, page, style)?;
+    let style = chosen.as_ref().unwrap_or(style);
     let blocks = group_blocks(&lines);
     let b = blocks.get(block).cloned().ok_or_else(|| EditError::Invalid(format!("page {} has no paragraph {}", page + 1, block + 1)))?;
     // Existing PDF paragraphs do not yet persist selected-row alignment intent. Refuse

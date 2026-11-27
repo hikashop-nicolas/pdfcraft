@@ -494,6 +494,25 @@ pub fn replace_block(doc: &mut Document, page: usize, block: usize, text: &str) 
     rewrite_block(doc, page, block, Some(text), &BlockStyle::default())
 }
 
+/// The resource name that stands for [`BlockStyle::font`] until it is embedded.
+pub const CHOSEN_FONT: &str = "\u{1}chosen";
+
+/// `style` with its chosen font embedded on `page` and named where it is asked for.
+pub(crate) fn with_chosen_font(doc: &mut Document, page: usize, style: &BlockStyle) -> Result<Option<BlockStyle>, EditError> {
+    let Some(bytes) = &style.font else { return Ok(None) };
+    let name = super::editor::register_user_text_font(doc, page, bytes)?;
+    let mut out = BlockStyle { font: None, ..style.clone() };
+    let mut asked = false;
+    for r in out.ranges.iter_mut().filter(|r| r.resource.as_deref() == Some(CHOSEN_FONT)) {
+        r.resource = Some(name.clone());
+        asked = true;
+    }
+    if out.resource.as_deref() == Some(CHOSEN_FONT) || !asked {
+        out.resource = Some(name);
+    }
+    Ok(Some(out))
+}
+
 /// Formatting for a rewritten paragraph (`None` keeps the paragraph's own).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BlockStyle {
@@ -501,6 +520,10 @@ pub struct BlockStyle {
     pub ranges: Vec<RangeStyle>,
     /// Explicit page font resource or bundled document-font choice from the page font inventory.
     pub resource: Option<String>,
+    /// A font program the person chose (fsType checked, no licence check): embedded on the page
+    /// and used where `resource`, or a range's, is [`CHOSEN_FONT`], or for the whole paragraph
+    /// when none says so.
+    pub font: Option<std::sync::Arc<Vec<u8>>>,
     /// A standard font family, bold, italic.
     pub family: Option<(crate::added::Family, bool, bool)>,
     /// Override weight without choosing a different family (`None` keeps the source weight).
