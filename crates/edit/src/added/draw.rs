@@ -100,6 +100,7 @@ pub(super) fn draw_laid_shaped(
             ShapedScript::Latin => EditError::Invalid(pdfcraft_fonts::shaped_text::latin_message(e, &c.text)),
             ShapedScript::Cjk | ShapedScript::Hans | ShapedScript::Hang => fallback_error(e, &c.text),
         })?;
+    let face = face_font(doc, t, laid, taken, fonts)?;
     out.extend(format!("BT {}\n", t.fill_op()).bytes());
     if t.char_spacing != 0.0 {
         out.extend(format!("{} Tc\n", n(t.char_spacing)).bytes());
@@ -118,11 +119,28 @@ pub(super) fn draw_laid_shaped(
         for piece in pieces {
             match piece {
                 Piece::Latin(s) => {
-                    out.extend(format!("/{latin} {} Tf {} Tw 1 0 0 1 {} {} Tm ", n(t.size), n(tw), n(pen), n(y)).bytes());
-                    out.extend(literal(&win_ansi(s)));
-                    out.extend_from_slice(b" Tj\n");
+                    for (in_face, run) in face_runs(face.as_ref(), s) {
+                        match face.as_ref().filter(|_| in_face) {
+                            Some((name, codes)) => {
+                                out.extend(format!("/{name} {} Tf 0 Tw 1 0 0 1 {} {} Tm [<", n(t.size), n(pen), n(y)).bytes());
+                                for c in run.chars() {
+                                    out.extend(format!("{:04X}", codes.get(&c).copied().unwrap_or(0)).bytes());
+                                    // Word spacing only moves single-byte spaces: justify by hand.
+                                    if c == ' ' && tw != 0.0 {
+                                        out.extend(format!("> {} <", n(-tw * 1000.0 / t.size)).bytes());
+                                    }
+                                }
+                                out.extend_from_slice(b">] TJ\n");
+                            }
+                            None => {
+                                out.extend(format!("/{latin} {} Tf {} Tw 1 0 0 1 {} {} Tm ", n(t.size), n(tw), n(pen), n(y)).bytes());
+                                out.extend(literal(&win_ansi(run)));
+                                out.extend_from_slice(b" Tj\n");
+                            }
+                        }
+                        pen += latin_width(t, run) + tw * run.matches(' ').count() as f64;
+                    }
                     current = None;
-                    pen += latin_width(t, s) + tw * s.matches(' ').count() as f64;
                 }
                 Piece::Shaped(clusters) => pen = shaped.show(out, clusters, pen, y, t.size, t.char_spacing, tw, &mut current),
             }
@@ -131,6 +149,72 @@ pub(super) fn draw_laid_shaped(
     }
     out.extend_from_slice(b"ET\n");
     Ok(())
+}
+
+/// The chosen face's resource name and the code of each character it draws.
+type FaceFont = (String, std::collections::HashMap<char, u16>);
+
+/// `s` cut into runs the face draws (`true`) and runs the standard font draws.
+fn face_runs<'a>(face: Option<&FaceFont>, s: &'a str) -> Vec<(bool, &'a str)> {
+    let Some((_, codes)) = face else { return vec![(false, s)] };
+    let mut out: Vec<(bool, &str)> = Vec::new();
+    let mut start = 0;
+    let mut kind = None;
+    for (i, c) in s.char_indices() {
+        let k = codes.contains_key(&c);
+        if kind.is_some_and(|was| was != k) {
+            out.push((kind.unwrap_or(false), &s[start..i]));
+            start = i;
+        }
+        kind = Some(k);
+    }
+    if start < s.len() {
+        out.push((kind.unwrap_or(false), &s[start..]));
+    }
+    out
+}
+
+/// Embeds the item's chosen face for the characters its lines draw in it: a Type 0 font with
+/// those glyphs, its widths and a ToUnicode map, named `PCArFace…` so it goes with the item.
+fn face_font(doc: &mut Document, t: &AddedText, laid: &[LaidLine], taken: &Dict, fonts: &mut Dict) -> Result<Option<FaceFont>, EditError> {
+    let Some(face) = &t.face else { return Ok(None) };
+    let mut chars: Vec<char> = Vec::new();
+    for (_, _, _, pieces, _) in laid {
+        for piece in pieces {
+            if let Piece::Latin(s) = piece {
+                for c in s.chars() {
+                    if !chars.contains(&c) {
+                        chars.push(c);
+                    }
+                }
+            }
+        }
+    }
+    let text: String = chars.iter().collect();
+    let mut mappings = Vec::new();
+    let mut codes = std::collections::HashMap::new();
+    for (c, g) in chars.iter().zip(pdfcraft_fonts::embedding::glyphs(&face.bytes, &text)) {
+        if let Some((gid, _)) = g {
+            mappings.push((c.to_string(), skrifa::GlyphId::new(u32::from(gid))));
+            codes.insert(*c, u16::try_from(mappings.len()).map_err(|_| EditError::Invalid("too many characters for one font".into()))?);
+        }
+    }
+    if mappings.is_empty() {
+        return Ok(None);
+    }
+    let mut scratch = Dict::new();
+    let made = pdfcraft_fonts::embedding::embed_mapping(doc, &mut scratch, &face.bytes, &face.name, &mappings).map_err(EditError::Invalid)?;
+    let font = scratch.get(made.as_bytes()).cloned().ok_or_else(|| EditError::Invalid("the face could not be embedded".into()))?;
+    let mut k = 0usize;
+    let name = loop {
+        let name = format!("PCArFace{k}");
+        if !taken.contains(name.as_bytes()) && !fonts.contains(name.as_bytes()) {
+            break name;
+        }
+        k += 1;
+    };
+    fonts.set(name.clone().into_bytes(), font);
+    Ok(Some((name, codes)))
 }
 
 /// Content and resources for an item; `view` maps display space to user space. `taken` holds the
@@ -167,6 +251,7 @@ pub(super) fn draw(doc: &mut Document, c: &Content, view: [f64; 6], taken: &Dict
                 || face_or_new(is_arabic, pdfcraft_fonts::document_arabic_font().is_some())
                 || face_or_new(is_hebrew, pdfcraft_fonts::document_hebrew_font(false).is_some())
                 || t.text.chars().any(|c| fallback_script(c).is_some())
+                || t.face.is_some()
             {
                 draw_shaped(doc, t, taken, &mut fonts, &mut out)?;
                 res.set(b"Font".to_vec(), Object::Dict(fonts));
@@ -251,6 +336,9 @@ pub(super) fn params(c: &Content) -> Dict {
             d.set(b"Rect".to_vec(), arr(&text_rect(t)));
             if t.char_spacing != 0.0 {
                 d.set(b"CharSpacing".to_vec(), Object::Real(t.char_spacing));
+            }
+            if let Some(face) = &t.face {
+                d.set(b"FaceName".to_vec(), PdfString::text(&face.name));
             }
         }
         Content::Image(i) => {

@@ -15,7 +15,29 @@ pub(super) fn norm(r: [f64; 4]) -> [f64; 4] {
 /// The advance of `s` in the item's standard font: its glyphs' widths and the character spacing
 /// after each of them, as `Tc` moves the pen (ISO 32000-2 §9.3.2).
 pub(super) fn latin_width(t: &AddedText, s: &str) -> f64 {
-    t.family.width(s, t.size, t.bold, t.italic) + t.char_spacing * s.chars().count() as f64
+    let spacing = t.char_spacing * s.chars().count() as f64;
+    let Some(face) = &t.face else { return t.family.width(s, t.size, t.bold, t.italic) + spacing };
+    // The face's advances for what it has; the standard font's for the rest, drawn in it.
+    let mut b = [0u8; 4];
+    let glyphs = pdfcraft_fonts::embedding::glyphs(&face.bytes, s);
+    s.chars()
+        .zip(glyphs)
+        .map(|(c, g)| g.map_or_else(|| t.family.width(c.encode_utf8(&mut b), t.size, t.bold, t.italic), |(_, w)| w * t.size))
+        .sum::<f64>()
+        + spacing
+}
+
+/// [`fallback_script`] for a character of `t`: none when its chosen face draws it.
+pub(super) fn fallback_in(t: &AddedText, c: char) -> Option<ShapedScript> {
+    match &t.face {
+        Some(face) if !c.is_control() && !is_bidi_control(c) && !is_arabic(c) && !is_hebrew(c) && !is_thai(c) && face.has(c) => None,
+        _ => fallback_script(c),
+    }
+}
+
+/// Japanese, Chinese and Korean characters, which a line may break between.
+fn is_cjk_range(c: char) -> bool {
+    matches!(u32::from(c), 0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFF00..=0xFFEF | 0x20000..=0x3FFFF)
 }
 
 /// The lines of a text item after wrapping to its box width.
@@ -40,7 +62,7 @@ pub(super) fn wrapped(t: &AddedText) -> Vec<(String, bool, usize)> {
         // Arabic or Hebrew: laid out with the bidirectional algorithm and shaped.
         let rtl_script = para.chars().any(|c| is_arabic(c) || is_hebrew(c));
         let thai = para.chars().any(is_thai);
-        if !rtl_script && !thai && para.chars().any(|c| fallback_script(c).is_some()) {
+        if !rtl_script && !thai && para.chars().any(|c| fallback_in(t, c).is_some() || (t.face.is_some() && is_cjk_range(c))) {
             out.extend(fallback_lines(t, para, width).into_iter().map(|line| (line, false, index)));
             continue;
         }
@@ -199,6 +221,12 @@ pub(super) fn is_hebrew(c: char) -> bool {
 /// draw (or that has no face to draw it). Page-content tools refuse such text; the Add-text editor
 /// keeps it open.
 pub fn first_undrawable(t: &AddedText) -> Option<char> {
+    if t.face.is_some() {
+        // What the chosen face draws is drawable; the rest is checked as without it.
+        let rest: String =
+            t.text.chars().filter(|c| *c == '\n' || fallback_in(t, *c).is_some() || !t.face.as_ref().is_some_and(|f| f.has(*c))).collect();
+        return first_undrawable(&AddedText { text: rest, face: None, ..t.clone() });
+    }
     if t.text.chars().any(is_thai) {
         if let Some(c) = t.text.chars().find(|c| is_thai(*c) && !pdfcraft_fonts::thai_has(*c)) {
             return Some(c);
@@ -232,7 +260,7 @@ pub fn first_undrawable(t: &AddedText) -> Option<char> {
 fn shaped_by_a_face(t: &AddedText) -> bool {
     (pdfcraft_fonts::document_arabic_font().is_some() && t.text.chars().any(is_arabic))
         || (pdfcraft_fonts::document_hebrew_font(false).is_some() && t.text.chars().any(is_hebrew))
-        || t.text.chars().any(|c| fallback_script(c).is_some())
+        || t.text.chars().any(|c| fallback_in(t, c).is_some())
 }
 
 /// The face that draws `c` when WinAnsi can't and it isn't Arabic, Hebrew or Thai: the bundled Inter for
@@ -317,7 +345,7 @@ fn fallback_lines(t: &AddedText, para: &str, width: f64) -> Vec<String> {
                 units.push(std::mem::take(&mut word));
             }
             units.push(" ".to_string());
-        } else if is_cjk_char(c) {
+        } else if is_cjk_char(c) || (t.face.is_some() && is_cjk_range(c)) {
             if !word.is_empty() {
                 units.push(std::mem::take(&mut word));
             }
@@ -401,6 +429,8 @@ pub(super) fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec
                 Some(ShapedScript::Hebrew)
             } else if is_arabic(c) || (run_rtl && !c.is_alphanumeric() && pdfcraft_fonts::arabic_has(c)) {
                 Some(ShapedScript::Arabic)
+            } else if fallback_in(t, c).is_none() {
+                None
             } else {
                 fallback_script_in(c, chinese)
             };
@@ -419,9 +449,7 @@ pub(super) fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec
                     ShapedScript::Hebrew => shape_hebrew(&s, run_rtl).map_err(|e| hebrew_error(e, &s))?,
                     ShapedScript::Thai => shape_thai(&s).map_err(|e| thai_error(e, &s))?,
                     // Not a script this layout splits out; shaped as such all the same.
-                    ShapedScript::Latin => {
-                        shape_latin(&s).map_err(|e| EditError::Invalid(pdfcraft_fonts::shaped_text::latin_message(e, &s)))?
-                    }
+                    ShapedScript::Latin => shape_latin(&s).map_err(|e| EditError::Invalid(pdfcraft_fonts::shaped_text::latin_message(e, &s)))?,
                     ShapedScript::Cjk => shape_cjk(&s).map_err(|e| fallback_error(e, &s))?,
                     ShapedScript::Hans => shape_hans(&s).map_err(|e| fallback_error(e, &s))?,
                     ShapedScript::Hang => shape_hang(&s).map_err(|e| fallback_error(e, &s))?,

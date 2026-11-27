@@ -144,6 +144,28 @@ impl Ink {
     }
 }
 
+/// A font program the person chose for added text, written as an embedded font.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Face {
+    /// Its PostScript name, which the PDF font is named after.
+    pub name: String,
+    pub bytes: std::sync::Arc<Vec<u8>>,
+}
+
+impl Face {
+    /// The face of `bytes`, checked as embedding checks it (size, outlines, fsType).
+    pub fn new(bytes: std::sync::Arc<Vec<u8>>) -> Result<Face, String> {
+        let (_, name) = pdfcraft_fonts::embedding::names(&bytes)?;
+        Ok(Face { name, bytes })
+    }
+
+    /// Whether it draws `c`.
+    pub fn has(&self, c: char) -> bool {
+        let mut b = [0u8; 4];
+        pdfcraft_fonts::embedding::glyphs(&self.bytes, c.encode_utf8(&mut b)).first().is_some_and(Option::is_some)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AddedText {
     /// The text box in display space; its width wraps the text and its top is the first line's
@@ -168,6 +190,8 @@ pub struct AddedText {
     /// Paragraphs (lines typed with Enter) aligned other than [`AddedText::align`], by index;
     /// `None` and paragraphs past the end follow `align` ([`crate::paragraph_align`]).
     pub aligns: Vec<Option<Align>>,
+    /// A chosen face, drawn in place of `family` for the characters it has.
+    pub face: Option<Face>,
 }
 
 impl AddedText {
@@ -229,6 +253,7 @@ impl Default for AddedText {
             align: Align::Left,
             aligns: Vec::new(),
             char_spacing: 0.0,
+            face: None,
         }
     }
 }

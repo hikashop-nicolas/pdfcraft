@@ -1,6 +1,6 @@
 use super::draw::{draw, params};
 use super::layout::{first_undrawable, is_thai, nums, shaped_arabic, thai_error};
-use super::types::{Added, AddedImage, AddedText, CHAR_SPACING_LIMIT, Family, Ink, MarkerScan, TAG};
+use super::types::{Added, AddedImage, AddedText, CHAR_SPACING_LIMIT, Face, Family, Ink, MarkerScan, TAG};
 use super::{Content, Dict, Document, EditError, GlyphError, MarkKind, ObjRef, Object, Stream, align_from, check, contents, page_list, place_tagged};
 
 /// A text item's gray or CMYK ink. Items written before inks, and an ink out of range or not
@@ -26,6 +26,35 @@ fn read_value<T>(doc: &Document, o: &Object, f: impl FnOnce(&Object) -> T) -> T 
         Object::Ref(_) => f(&doc.resolve(o)),
         direct => f(direct),
     }
+}
+
+thread_local! {
+    /// Faces read back, by the program object they came from (kept alive so its address stays its own).
+    static FACES: std::cell::RefCell<Vec<(std::sync::Arc<Object>, Face)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A text item's chosen face: the program of its `/Face` font.
+fn face(doc: &Document, d: &Dict) -> Option<Face> {
+    let font = doc.dict(d.get(b"Face")?)?;
+    let cid = doc.dict(doc.resolve(font.get(b"DescendantFonts")?).as_array()?.first()?)?;
+    let descriptor = doc.dict(cid.get(b"FontDescriptor")?)?;
+    let program = doc.resolve(descriptor.get(b"FontFile2").or_else(|| descriptor.get(b"FontFile3"))?);
+    if let Some(f) = FACES.with(|c| c.borrow().iter().find(|(p, _)| std::sync::Arc::ptr_eq(p, &program)).map(|(_, f)| f.clone())) {
+        return Some(f);
+    }
+    let bytes = pdfcraft_fonts::pdf::embedded_sfnt(doc, &font)?;
+    let mut face = Face::new(std::sync::Arc::new(bytes)).ok()?;
+    if let Some(name) = d.get(b"FaceName").and_then(|n| doc.resolve(n).as_string().map(|s| s.to_text())) {
+        face.name = name;
+    }
+    FACES.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() >= 16 {
+            c.remove(0);
+        }
+        c.push((program, face.clone()));
+    });
+    Some(face)
 }
 
 fn parse(doc: &Document, d: &Dict) -> Option<Content> {
@@ -59,6 +88,7 @@ fn parse(doc: &Document, d: &Dict) -> Option<Content> {
                 aligns: crate::paragraph_align::tidy(aligns, align),
                 // Items written before character spacing have none.
                 char_spacing: d.get(b"CharSpacing").and_then(Object::as_f64).filter(|v| v.is_finite()).unwrap_or(0.0),
+                face: face(doc, d),
             };
             // An ink whose look isn't the stored colour (a file edited by hand) is none.
             t.drop_stale_ink();
@@ -236,6 +266,12 @@ fn write(doc: &mut Document, page: usize, c: &Content, obj: Option<ObjRef>) -> R
     let mut sd = Dict::new();
     sd.set(b"PCMark".to_vec(), Object::name(TAG));
     let mut added = params(c);
+    // The item's face is its embedded font, read back from there.
+    let face_font =
+        res.get(b"Font").and_then(Object::as_dict).and_then(|f| f.iter().find(|(k, _)| k.starts_with(b"PCArFace")).map(|(_, v)| v.clone()));
+    if let Some(font) = face_font {
+        added.set(b"Face".to_vec(), font);
+    }
     if user_unit != 1.0 {
         added.set(b"UserUnit".to_vec(), Object::Real(user_unit));
     }

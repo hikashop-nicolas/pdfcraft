@@ -31,6 +31,22 @@ pub fn covers(bytes: &[u8], text: &str) -> bool {
     FontRef::new(bytes).is_ok_and(|f| text.chars().all(|c| matches!(c, '\n' | '\r') || f.charmap().map(c).is_some_and(|g| g.to_u32() != 0)))
 }
 
+/// For each character of `text`, its glyph in the face and the glyph's advance per em, or `None`
+/// where the face has none.
+pub fn glyphs(bytes: &[u8], text: &str) -> Vec<Option<(u16, f64)>> {
+    let Ok(f) = FontRef::new(bytes) else { return text.chars().map(|_| None).collect() };
+    let charmap = f.charmap();
+    let loc = LocationRef::default();
+    let upem = f64::from(f.metrics(Size::unscaled(), loc).units_per_em.max(1));
+    let advances = f.glyph_metrics(Size::unscaled(), loc);
+    text.chars()
+        .map(|c| {
+            let g = charmap.map(c).filter(|g| g.to_u32() != 0)?;
+            Some((u16::try_from(g.to_u32()).ok()?, f64::from(advances.advance_width(g).unwrap_or(0.0)) / upem))
+        })
+        .collect()
+}
+
 /// Names come from the program, never a caller's guessed family.
 pub fn names(bytes: &[u8]) -> Result<(String, String), String> {
     use skrifa::string::StringId;
