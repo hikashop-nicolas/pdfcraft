@@ -182,6 +182,11 @@ impl Pdf {
         self.inner.set_text(page, target, text.as_deref(), &style).map_err(js)
     }
 
+    /// Sets a text box's face (a name `register_text_font` returned), or back to its own with none.
+    pub fn set_annotation_font(&mut self, page: usize, index: usize, font: Option<String>) -> Result<(), JsError> {
+        self.inner.set_annotation_font(page, index, font.as_deref()).map_err(js)
+    }
+
     /// Keeps a font file (.ttf or .otf) for text; returns `{"font", "family"}`, `font` being what styles name.
     pub fn register_text_font(&mut self, bytes: &[u8]) -> Result<String, JsError> {
         self.inner.register_text_font(bytes).map_err(js)

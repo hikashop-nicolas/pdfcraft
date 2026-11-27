@@ -114,7 +114,7 @@ fn build_appearance(doc: &Document, d: &Dict, direct: &Dict, page: Option<[f64; 
 
 /// Entries that link the annotation to other objects rather than describe how it looks: left as
 /// references by [`with_direct_values`].
-const LINK_KEYS: [&[u8]; 5] = [b"P", b"Popup", b"IRT", b"Parent", b"AP"];
+const LINK_KEYS: [&[u8]; 6] = [b"P", b"Popup", b"IRT", b"Parent", b"AP", b"PCFace"];
 
 /// How deep inside an entry [`with_direct_values`] follows references: `/InkList` is an array of
 /// arrays, `/Border` may end in a dash array.

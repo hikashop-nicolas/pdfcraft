@@ -150,8 +150,8 @@ impl Document {
     /// The page's comments and marks (highlights, notes, shapes) as JSON: `index`, `subtype`, `view`, `contents`.
     pub fn annotations_json(&self, page: usize) -> Result<String, String> {
         let info = self.page_info_ref(page)?;
-        let list: Vec<Value> = self
-            .doc()?
+        let doc = self.doc()?;
+        let list: Vec<Value> = doc
             .info
             .annotations
             .iter()
@@ -163,6 +163,7 @@ impl Document {
                     "index": a.index,
                     "subtype": a.subtype,
                     "contents": a.contents,
+                    "font": (a.subtype == "FreeText").then(|| doc.annotation_face(page, a.index)).flatten(),
                     "view": [p[0].min(q[0]), p[1].min(q[1]), p[0].max(q[0]), p[1].max(q[1])],
                 })
             })
@@ -278,7 +279,21 @@ impl Document {
         }
         let contents = v["contents"].as_str().unwrap_or_default().to_string();
         let author = v["author"].as_str().unwrap_or_default().to_string();
-        self.apply(Edit::AddAnnotation(NewAnnotation { page, shape, style, contents, author }))
+        let add = Edit::AddAnnotation(NewAnnotation { page, shape, style, contents, author });
+        // A text box in a chosen face: added and set in it as one step.
+        match v["font"].as_str().filter(|f| !f.is_empty()) {
+            Some(name) => {
+                let font = Some(self.faces.get(name).cloned().ok_or_else(|| format!("the font {name:?} was not registered"))?);
+                self.apply(Edit::Batch { label: "Add comment".into(), edits: vec![add, Edit::SetAnnotationFont { page, index: None, font }] })
+            }
+            None => self.apply(add),
+        }
+    }
+
+    /// Sets a text box's face (a font given to `register_text_font`), or back to its own with `None`.
+    pub fn set_annotation_font(&mut self, page: usize, index: usize, font: Option<&str>) -> Result<(), String> {
+        let font = font.map(|name| self.faces.get(name).cloned().ok_or_else(|| format!("the font {name:?} was not registered"))).transpose()?;
+        self.apply(Edit::SetAnnotationFont { page, index: Some(index), font })
     }
 
     /// The stamps that can be added: `name` (what `add_annotation` takes), the `label` on it, its `group`

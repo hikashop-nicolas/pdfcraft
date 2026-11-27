@@ -329,6 +329,16 @@ impl Document {
         self.editor.as_ref().and_then(|e| pdfcraft_edit::page_images(&e.cos, page).ok()).unwrap_or_default()
     }
 
+    /// The face a text box (comment `index` of `page`) is drawn in when one was chosen: its font's name.
+    pub fn annotation_face(&self, page: usize, index: usize) -> Option<String> {
+        let cos = &self.editor.as_ref()?.cos;
+        let p = pdfcraft_model::pages(cos).into_iter().nth(page)?;
+        let annots = cos.resolve(p.dict.get(b"Annots")?);
+        let annot = cos.dict(annots.as_array()?.get(index)?)?;
+        let font = cos.dict(annot.get(b"PCFace")?)?;
+        Some(pdfcraft_edit::strip_subset_tag(&String::from_utf8_lossy(font.name(b"BaseFont")?)).to_string())
+    }
+
     /// Mixed editable objects on one page. Source inventories are zero-based and added items
     /// appear once. Rectangles are user-space points, independent of the viewer's zoom.
     pub fn editable_objects(&self, page: usize) -> Result<Vec<EditableObject>, String> {

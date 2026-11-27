@@ -1572,3 +1572,43 @@ pub fn erase_ink(doc: &mut Document, page: usize, index: usize, path: &[[f64; 2]
     set_appearance(doc, r)?;
     Ok(true)
 }
+
+/// Sets a text box's face (`bytes`, a font program the person chose; `None` goes back to the
+/// standard face of `/DA`, which stays as it was for readers that draw from it): the face is
+/// embedded as a font of its own, named by `/PCFace`, and the appearance drawn in it. `index`
+/// `None` is the page's last text box (the one just added).
+pub fn set_text_face(doc: &mut Document, page: usize, index: Option<usize>, bytes: Option<&[u8]>, meta: &Meta) -> Result<(), AnnotError> {
+    let index = match index {
+        Some(i) => i,
+        None => {
+            let p = page_ref(doc, page)?;
+            let list = annots(doc, p);
+            list.iter()
+                .rposition(|a| doc.dict(a).is_some_and(|d| d.name(b"Subtype") == Some(b"FreeText")))
+                .ok_or(AnnotError::NoSuchAnnotation { page, index: list.len() })?
+        }
+    };
+    let (_, r) = annot_ref(doc, page, index)?;
+    if annot_dict(doc, r).name(b"Subtype") != Some(b"FreeText") {
+        return Err(AnnotError::Invalid("only a text box takes a font".into()));
+    }
+    let font = match bytes {
+        Some(bytes) => {
+            let (_, name) = pdfcraft_fonts::embedding::names(bytes).map_err(AnnotError::Invalid)?;
+            let mut fonts = Dict::new();
+            let resource = pdfcraft_fonts::embedding::embed(doc, &mut fonts, bytes, &name).map_err(AnnotError::Invalid)?;
+            Some(fonts.get(resource.as_bytes()).cloned().ok_or_else(|| AnnotError::Invalid("the font could not be embedded".into()))?)
+        }
+        None => None,
+    };
+    doc.update_dict(r, |d| {
+        match font {
+            Some(f) => d.set(b"PCFace".to_vec(), f),
+            None => {
+                d.remove(b"PCFace");
+            }
+        }
+        touch(d, meta);
+    })?;
+    draw_appearance(doc, r)
+}

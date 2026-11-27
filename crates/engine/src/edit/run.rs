@@ -56,6 +56,7 @@ pub(crate) fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Re
         | Edit::AddModel3d { .. }
         | Edit::DeleteAnnotation { .. }
         | Edit::SetAnnotationContents { .. }
+        | Edit::SetAnnotationFont { .. }
         | Edit::ReplyToAnnotation { .. }
         | Edit::SetAnnotationStatus { .. }
         | Edit::MarkAnnotation { .. }
@@ -687,6 +688,9 @@ pub(crate) fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut E
         }
         Edit::DeleteAnnotation { page, index } => pdfcraft_annot::delete_annotation(doc, *page, *index)?,
         Edit::SetAnnotationContents { page, index, text } => pdfcraft_annot::set_contents(doc, *page, *index, text, &cx.meta())?,
+        Edit::SetAnnotationFont { page, index, font } => {
+            pdfcraft_annot::set_text_face(doc, *page, *index, font.as_deref().map(Vec::as_slice), &cx.meta())?
+        }
         Edit::ReplyToAnnotation { page, index, text, author } => {
             pdfcraft_annot::add_reply(doc, *page, *index, text, author, &cx.meta())?;
         }

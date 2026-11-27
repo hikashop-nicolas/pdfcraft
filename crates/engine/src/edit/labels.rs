@@ -233,6 +233,7 @@ impl Edit {
             Edit::DeleteAnnotation { .. } => Label::of("Delete comment"),
             Edit::PasteComments { .. } => Label::of("Paste comments"),
             Edit::SetAnnotationContents { .. } => Label::of("Edit comment"),
+            Edit::SetAnnotationFont { .. } => Label::of("Change font"),
             Edit::ReplyToAnnotation { .. } => Label::of("Reply"),
             // The state's name is part of the wording: a language may need to agree it with the rest.
             Edit::SetAnnotationStatus { state, .. } => Label::of(match state {

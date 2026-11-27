@@ -942,6 +942,45 @@ mod tests {
     }
 
     #[test]
+    fn a_text_box_keeps_its_face_through_edits_saves_and_flattening() {
+        let mut doc = open();
+        let name = register(&mut doc);
+        let spec = serde_json::json!({ "type": "textbox", "box": [20, 40, 180, 80], "fontSize": 14, "contents": "Grüße", "font": name });
+        doc.add_annotation(0, &spec.to_string()).expect("adds a text box");
+        let listed: Vec<Value> = serde_json::from_str(&doc.annotations_json(0).expect("annotations")).expect("json");
+        let index = listed.iter().find(|a| a["subtype"] == "FreeText").expect("the box")["index"].as_u64().expect("index") as usize;
+        assert!(listed[index]["font"].as_str().is_some_and(|f| f.ends_with(&name)), "{listed:?}");
+        doc.set_annotation_contents(0, index, "Ωmega words").expect("retypes");
+        let listed: Vec<Value> = serde_json::from_str(&doc.annotations_json(0).expect("annotations")).expect("json");
+        assert!(listed[index]["font"].as_str().is_some_and(|f| f.ends_with(&name)), "the face stays: {listed:?}");
+        let saved = doc.save().expect("saves");
+        let fonts = all_fonts(&saved);
+        let (base, program) = fonts.iter().find(|(b, _)| b.ends_with(&name)).expect("the face is embedded");
+        assert!(base.as_bytes().get(6) == Some(&b'+') && program.len() * 4 < INTER.len(), "a subset: {base} {}", program.len());
+        assert!(pdfcraft_fonts::embedding::covers(program, "Ωmega words"));
+        // Flattened, the box is page content in the same face.
+        doc.apply(Edit::Flatten { comments: true, fields: false }).expect("flattens");
+        let flat = doc.save().expect("saves");
+        let back = Document::open(&flat, None, || 0).expect("reopens");
+        assert!(
+            serde_json::from_str::<Vec<Value>>(&back.annotations_json(0).expect("annotations"))
+                .expect("json")
+                .iter()
+                .all(|a| a["subtype"] != "FreeText")
+        );
+        let fonts = all_fonts(&flat);
+        assert!(fonts.iter().any(|(b, p)| b.ends_with(&name) && pdfcraft_fonts::embedding::covers(p, "Ωmega words")), "{fonts:?}");
+        // Back to the standard face; undo brings the face back.
+        doc.undo().expect("undoes the flattening");
+        doc.set_annotation_font(0, index, None).expect("clears");
+        let listed: Vec<Value> = serde_json::from_str(&doc.annotations_json(0).expect("annotations")).expect("json");
+        assert_eq!(listed[index]["font"], Value::Null);
+        doc.undo().expect("undoes");
+        let listed: Vec<Value> = serde_json::from_str(&doc.annotations_json(0).expect("annotations")).expect("json");
+        assert!(listed[index]["font"].as_str().is_some());
+    }
+
+    #[test]
     fn a_face_that_forbids_subsetting_is_saved_whole_and_restricted_ones_are_refused() {
         let with_fs_type = |fs: u16| {
             let mut font = INTER.to_vec();

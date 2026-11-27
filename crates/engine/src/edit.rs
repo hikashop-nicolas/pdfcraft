@@ -204,6 +204,13 @@ pub enum Edit {
         index: usize,
         text: String,
     },
+    /// A text box's face: a font program the person chose, embedded and drawn in its appearance
+    /// (`None` goes back to its standard face). `index` `None` is the page's last text box.
+    SetAnnotationFont {
+        page: usize,
+        index: Option<usize>,
+        font: Option<Arc<Vec<u8>>>,
+    },
     ReplyToAnnotation {
         page: usize,
         index: usize,

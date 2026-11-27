@@ -14,7 +14,7 @@
 //! (`pdfcraft_fonts::shaped_text`, the writer Add text uses); lines break at that face's
 //! standard-14 widths and the Thai face's shaped advances (no other font program is bundled).
 
-use pdfcraft_cos::{Dict, Object, PdfString, Stream};
+use pdfcraft_cos::{Dict, ObjRef, Object, PdfString, Stream};
 use pdfcraft_fonts::shaped_text;
 use pdfcraft_fonts::{first_undrawable, literal, win_ansi, wrap_with};
 
@@ -551,6 +551,8 @@ pub fn undrawable_text(d: &Dict) -> Option<(&'static str, char)> {
     let text = |key: &[u8]| d.get(key).and_then(Object::as_string).map(PdfString::to_text);
     let (what, text) = match d.name(b"Subtype")? {
         // A text box draws Thai too.
+        // One in a chosen face draws what that face has.
+        b"FreeText" if d.contains(b"PCFace") => return None,
         b"FreeText" => return Some(("the comment's text", shaped_text::first_undrawable(&text(b"Contents")?)?)),
         b"Line" if !d.contains(b"PCMeasureValue") => ("the line's caption", line_caption(d)?),
         b"Line" | b"PolyLine" | b"Polygon" => ("the measurement label", text(b"PCMeasureValue")?),
@@ -1441,6 +1443,94 @@ fn shaped_border(
     Some(rect)
 }
 
+/// A text box's chosen face: its embedded font (`/PCFace`) and that font's metrics.
+struct ChosenFace {
+    font: ObjRef,
+    metrics: pdfcraft_fonts::pdf::Metrics,
+}
+
+fn chosen_face(doc: &Document, d: &Dict) -> Option<ChosenFace> {
+    let font = d.get(b"PCFace")?.as_ref()?;
+    let dict = doc.get(font).as_dict()?.clone();
+    (dict.name(b"Subtype") == Some(b"Type0")).then(|| ChosenFace { font, metrics: pdfcraft_fonts::pdf::Metrics::from_dict(doc, &dict) })
+}
+
+/// `line` cut into runs the face encodes (`true`) and runs it does not.
+fn face_runs<'a>(m: &pdfcraft_fonts::pdf::Metrics, line: &'a str) -> Vec<(bool, &'a str)> {
+    let mut out: Vec<(bool, &str)> = Vec::new();
+    let mut start = 0;
+    let mut kind = None;
+    for (i, c) in line.char_indices() {
+        let mut b = [0u8; 4];
+        let k = m.encode(c.encode_utf8(&mut b)).is_some();
+        if kind.is_some_and(|was| was != k) {
+            out.push((kind.unwrap_or(false), &line[start..i]));
+            start = i;
+        }
+        kind = Some(k);
+    }
+    if start < line.len() {
+        out.push((kind.unwrap_or(false), &line[start..]));
+    }
+    out
+}
+
+/// Where a text box's lines go: its box, padding, line width, size, and whether they are centred
+/// up and down (`round`) and how across (`q`, as `/Q`).
+struct TextBox {
+    rect: [f64; 4],
+    pad: f64,
+    width: f64,
+    size: f64,
+    round: bool,
+    q: i64,
+}
+
+/// A text box's lines in its chosen face, the characters it lacks in the standard face `std`.
+fn draw_face_lines(out: &mut Vec<u8>, chosen: &ChosenFace, std: pdfcraft_fonts::Std14, text: &str, b: &TextBox) {
+    let TextBox { rect, pad, width, size, round, q } = *b;
+    let std_name = crate::text_style::resource_name(std);
+    let char_width = |c: char| {
+        let mut buf = [0u8; 4];
+        let s = c.encode_utf8(&mut buf);
+        let code = chosen.metrics.encode(s).and_then(|codes| chosen.metrics.codes(&codes).first().map(|(code, _)| *code));
+        code.map_or_else(|| std.text_width(s, size), |code| chosen.metrics.width(code) * size)
+    };
+    let lines = pdfcraft_fonts::wrap_with(text, size, width, |s, _| s.chars().map(char_width).sum());
+    let mut y = rect[3] - pad - size * reach(&lines)[0];
+    if round {
+        y -= ((rect[3] - rect[1] - 2.0 * pad - text_lines_height(&lines, size)) / 2.0).max(0.0);
+    }
+    for line in &lines {
+        if y < rect[1] - size {
+            break;
+        }
+        let lw: f64 = line.chars().map(char_width).sum();
+        let mut x = match q {
+            1 => rect[0] + pad + (width - lw) / 2.0,
+            2 => rect[2] - pad - lw,
+            _ => rect[0] + pad,
+        };
+        for (in_face, run) in face_runs(&chosen.metrics, line) {
+            out.extend(format!("1 0 0 1 {} {} Tm\n", n(x), n(y)).bytes());
+            match chosen.metrics.encode(run).filter(|_| in_face) {
+                Some(codes) => {
+                    out.extend(format!("/PCFace {} Tf\n<", n(size)).bytes());
+                    out.extend(codes.iter().map(|b| format!("{b:02X}")).collect::<String>().bytes());
+                    out.extend_from_slice(b"> Tj\n");
+                }
+                None => {
+                    out.extend(format!("/{std_name} {} Tf\n", n(size)).bytes());
+                    out.extend(literal(&win_ansi(run)));
+                    out.extend_from_slice(b" Tj\n");
+                }
+            }
+            x += run.chars().map(char_width).sum::<f64>();
+        }
+        y -= size * 1.2;
+    }
+}
+
 fn draw_free_text(context: &AppearanceContext<'_>, mut drawing: AppearanceDrawing, dr_face: Option<pdfcraft_fonts::Std14>) -> Option<Stream> {
     let d = context.dict;
     let parts = context.parts;
@@ -1566,6 +1656,21 @@ fn draw_free_text(context: &AppearanceContext<'_>, mut drawing: AppearanceDrawin
     let mut y = rect[3] - pad - size * reach(&lines)[0];
     if round {
         y -= ((rect[3] - rect[1] - 2.0 * pad - text_lines_height(&lines, size)) / 2.0).max(0.0);
+    }
+    // A chosen face (`/PCFace`, an embedded font): what it has is drawn in it, the rest in the
+    // box's standard face, which `/DA` keeps naming for readers that draw from it.
+    if let Some(chosen) = chosen_face(context.doc, d) {
+        let mut fonts = font_resources(face);
+        fonts.set(b"PCFace".to_vec(), Object::Ref(chosen.font));
+        let layout = TextBox { rect, pad, width, size, round, q };
+        draw_face_lines(&mut out, &chosen, face, &text, &layout);
+        out.extend_from_slice(b"ET\n");
+        res.set(b"Font".to_vec(), Object::Dict(fonts));
+        let mut stream = form(full, &out, res);
+        if let Some(m) = matrix {
+            stream.dict.set(b"Matrix".to_vec(), Object::Array(m.iter().copied().map(Object::Real).collect()));
+        }
+        return Some(stream);
     }
     // Thai is shaped and drawn from the Thai face (Type 3 fonts in the form's resources, whose
     // streams `apply_appearance` stores in the document); the rest, and Thai it can't draw (as

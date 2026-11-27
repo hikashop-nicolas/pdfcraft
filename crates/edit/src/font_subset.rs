@@ -160,7 +160,8 @@ impl Walk<'_> {
         }
         let object = self.doc.get(r);
         let Object::Stream(s) = object.as_ref() else { return };
-        if s.dict.name(b"Subtype") != Some(b"Form") {
+        // Appearance streams may leave `/Subtype /Form` out.
+        if s.dict.name(b"Subtype").is_some_and(|t| t != b"Form") {
             return;
         }
         let resources = s.dict.get(b"Resources").and_then(|o| self.doc.dict(o)).unwrap_or_else(|| parent.clone());

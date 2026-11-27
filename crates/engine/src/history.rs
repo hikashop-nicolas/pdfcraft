@@ -63,6 +63,7 @@ pub(crate) fn scope_of(edit: &Edit) -> Scope {
         | Edit::AddModel3d { .. }
         | Edit::DeleteAnnotation { .. }
         | Edit::SetAnnotationContents { .. }
+        | Edit::SetAnnotationFont { .. }
         | Edit::ReplyToAnnotation { .. }
         | Edit::SetAnnotationStatus { .. }
         | Edit::MarkAnnotation { .. }
